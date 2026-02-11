@@ -1,0 +1,24 @@
+{
+    "toplovo": {
+        "gs-223": {
+            "status": {
+                "command": "STATUS#",
+                "expected": "STATUS:OK"
+            }
+        }
+    },
+    "gsm": {
+        "it-443": {
+            "status": {
+                "command": "STATUS",
+                "expected": "OK"
+            }
+        },
+        "fx-222": {
+            "status": {
+                "command": "STATUS",
+                "expected":"OK"
+            }
+        }
+    }
+}
