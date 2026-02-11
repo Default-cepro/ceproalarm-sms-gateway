@@ -1,33 +1,39 @@
-import time
-from .gsm.fake import FakeGSM
+from .storage.excel import load_devices, save_devices
+from .core.commands import get_command
+from .core.parser import parse_response
+from .sms.simulator import send_sms
+import numpy as np
+
+
+EXCEL_PATH = "data/localizadores.xlsx"
 
 
 def main():
-    gsm = FakeGSM(response_delay=0.5)
+    df = load_devices(EXCEL_PATH)
+    counter = 0
+    for index, row in df.iterrows():
+        phone = str(row["Teléfono"])
+        brand = str(row["Marca"])
+        model = str(row["Modelo"])
 
-    trackers = [
-        {"phone": "+584121111111", "command": "imei123456789012345"},
-        {"phone": "+584122222222", "command": "status"},
-        {"phone": "+584123333333", "command": "reset"},
-    ]
+        try:
+            command_data = get_command(brand, model)
+            response = send_sms(brand, model, phone, command_data["command"])
+            status = parse_response(response, command_data["expected"])
 
-    print("=== Envío de comandos ===")
-    for tracker in trackers:
-        gsm.send_sms(tracker["phone"], tracker["command"])
+            df.at[index, "Estado"] = status
+            df.at[index, "Error"] = np.nan
+            print(f"✅ {phone} actualizado a {status}\n")
 
-    print("\n=== Escuchando respuestas ===")
-    start_time = time.time()
-    timeout = 5  # segundos
+        except Exception as e:
+            counter = counter + 1
+            df.at[index, "Estado"] = "ERROR"
+            df.at[index, "Error"] = f"{e}"
+            print(f"❌ Error con {phone}: {e}\n")
+    
+    print(f"Hubieron {counter} inconvenientes (revisar log)")
 
-    while time.time() - start_time < timeout:
-        sms = gsm.read_sms()
-        if sms:
-            phone, message = sms
-            print(f"[RESPUESTA] {phone}: {message}")
-        else:
-            time.sleep(0.2)
-
-    print("\nProceso finalizado.")
+    save_devices(df, EXCEL_PATH)
 
 
 if __name__ == "__main__":
