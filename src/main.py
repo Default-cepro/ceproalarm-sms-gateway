@@ -3,6 +3,7 @@ from .core.commands import get_command, COMMANDS
 from .core.parser import parse_response
 from .core.validator import validate_devices
 from .core.logger import setup_logger
+from .core.retry import send_with_retry
 from .sms.simulator import send_sms
 import numpy as np
 import time
@@ -16,6 +17,11 @@ def main():
     start_time = time.time()
 
     df = load_devices(EXCEL_PATH)
+    
+    if "Error" in df.columns:
+        df["Error"] = None
+        df["Error"] = df["Error"].astype("object")
+        
     total_devices = len(df)
 
     valid_indexes, invalid_devices = validate_devices(df, COMMANDS)
@@ -34,7 +40,6 @@ def main():
     for index, error_message in invalid_devices:
         unsupported_counter += 1
 
-        df.at[index, "Error"] = np.nan
         df.at[index, "Estado"] = "NO SOPORTADO"
         df.at[index, "Error"] = error_message
 
@@ -61,18 +66,20 @@ def main():
         try:
             command_data = get_command(brand, model)
 
-            response = send_sms(
-                brand,
-                model,
+            response = send_with_retry(
+                send_sms,
+                3,
+                2,
                 phone,
                 command_data["command"]
             )
-
+            
+            
             status = parse_response(
                 response,
                 command_data["expected"]
             )
-            if status == "INOPERATIVO":
+            if status == "ERROR" or status == "INOPERATIVO":
                 inoperative_counter += 1
 
             df.at[index, "Estado"] = status
@@ -86,7 +93,7 @@ def main():
 
         except Exception as e:
             execution_errors += 1
-
+            inoperative_counter += 1
             df.at[index, "Estado"] = "ERROR"
             df.at[index, "Error"] = str(e)
 
@@ -94,7 +101,7 @@ def main():
                 f"Error con 0{phone} {brand} {model}: {e}"
             )
             print("\n")
-
+        
     processing_end = time.time()
 
     # ---------------------------

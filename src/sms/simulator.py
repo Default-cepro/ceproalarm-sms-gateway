@@ -1,16 +1,26 @@
-import time, random
+import random
+import time
 
-prob = random.random()
-def send_sms(brand: str, model: str, phone: str, message: str) -> str:
-    print(f"Enviando SMS a {brand} {model} tlf: 0{phone}: {message}")
-    
-    time.sleep(2.5)
-    prob = random.random()
-    
-#    if "STATUS" in message:
-#            return f"IMEI:{phone};STATUS:OK"
 
-    if "STATUS" in message and prob > 0.5:
-        return f"IMEI:{phone};STATUS:OK"
+class TimeoutException(Exception):
+    pass
 
-    return "ERROR"
+
+def send_sms(phone: str, message: str) -> str:
+    print(f"Enviando SMS a {phone}: {message}")
+
+    # Simular latencia real
+    time.sleep(random.uniform(0.5, 2.0))
+
+    probability = random.random()
+
+    # 20% timeout
+    if probability < 0.2:
+        raise TimeoutException("Timeout")
+
+    # 10% error raro
+    if probability < 0.3:
+        return "ERROR"
+
+    # 70% éxito
+    return f"IMEI:{phone};STATUS:OK"
