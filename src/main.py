@@ -1,143 +1,102 @@
-from .storage.excel import load_devices, save_devices
-from .core.commands import get_command, COMMANDS
-from .core.parser import parse_response
-from .core.validator import validate_devices
+import asyncio, time
+import pandas as pd
+from pathlib import Path
+
 from .core.logger import setup_logger
-from .core.retry import send_with_retry
-from .sms.simulator import send_sms
-import numpy as np
-import time
+from .core.validator import validate_devices
+from .core.commands import COMMANDS
+from .storage.excel import load_devices, save_devices
 
-logger = setup_logger()
+from .services.sms_service import SMSService
+from .services.metrics import Metrics
+from .services.queue_manager import process_devices
 
-EXCEL_PATH = "data/localizadores.xlsx"
+
+# Configuración
+EXCEL_PATH = Path(__file__).resolve().parents[1] / "data" / "localizadores.xlsx"
+
+NUM_WORKERS = 3
+MAX_CONCURRENT_SMS = 1
 
 
-def main():
-    start_time = time.time()
-
-    df = load_devices(EXCEL_PATH)
+async def async_main():
     
-    if "Error" in df.columns:
-        df["Error"] = None
-        df["Error"] = df["Error"].astype("object")
-        
-    total_devices = len(df)
+    # Empezamos a contar el tiempo
+    start_time = time.perf_counter()
 
+    logger = setup_logger()
+    logger.info("==========INICIO DE EJECUCIÓN==========")
+    logger.info("Iniciando procesamiento de dispositivos")
+
+    # Cargar Excel
+    df = load_devices(EXCEL_PATH)
+
+    # Limpiar columna Estado y Error
+    df["Estado"] = pd.Series(dtype="string")
+    df["Error"] = pd.Series(dtype="string")
+
+
+    # Crear métricas
+    metrics = Metrics()
+
+    # Validar dispositivos
     valid_indexes, invalid_devices = validate_devices(df, COMMANDS)
 
-    execution_errors = 0
-    unsupported_counter = 0
-    success_counter = 0
-    inoperative_counter = 0
-
-    logger.info("==== INICIO DE EJECUCIÓN ====")
-    logger.info(f"Total dispositivos en Excel: {total_devices}")
-
-    # ---------------------------
-    # VALIDACIÓN
-    # ---------------------------
+    # Marcar no soportados desde validación
     for index, error_message in invalid_devices:
-        unsupported_counter += 1
-
+        metrics.unsupported += 1
         df.at[index, "Estado"] = "NO SOPORTADO"
         df.at[index, "Error"] = error_message
 
-        logger.warning(error_message)
+    logger.info(f"{len(valid_indexes)} dispositivos válidos")
+    logger.warning(f"{metrics.unsupported} dispositivos no soportados")
 
-    print("\n")
-    logger.info(f"\nDispositivos válidos: {len(valid_indexes)}")
-    logger.info(f"No soportados: {unsupported_counter}\n")
-
-    # ---------------------------
-    # PROCESAMIENTO
-    # ---------------------------
-    processing_start = time.time()
-
-    for index in valid_indexes:
-        row = df.loc[index]
-
-        phone = str(row["Teléfono"])
-        brand = str(row["Marca"])
-        model = str(row["Modelo"])
-
-        logger.info(f"Procesando 0{phone} | {brand} {model}")
-
-        try:
-            command_data = get_command(brand, model)
-
-            response = send_with_retry(
-                send_sms,
-                3,
-                2,
-                phone,
-                command_data["command"]
-            )
-            
-            
-            status = parse_response(
-                response,
-                command_data["expected"]
-            )
-            if status == "ERROR" or status == "INOPERATIVO":
-                inoperative_counter += 1
-
-            df.at[index, "Estado"] = status
-
-            success_counter += 1
-
-            logger.success(
-                f"0{phone} {brand} {model} actualizado a {status}"
-            )
-            print("\n")
-
-        except Exception as e:
-            execution_errors += 1
-            inoperative_counter += 1
-            df.at[index, "Estado"] = "ERROR"
-            df.at[index, "Error"] = str(e)
-
-            logger.error(
-                f"Error con 0{phone} {brand} {model}: {e}"
-            )
-            print("\n")
-        
-    processing_end = time.time()
-
-    # ---------------------------
-    # MÉTRICAS
-    # ---------------------------
-    total_time = time.time() - start_time
-    processing_time = processing_end - processing_start
-
-    processed_devices = len(valid_indexes)
-    attempted_devices = processed_devices
-    effective_devices = total_devices - unsupported_counter
-
-    success_rate = (
-        (success_counter / effective_devices) * 100
-        if effective_devices > 0 else 0
+    # Crear servicio SMS
+    sms_service = SMSService(
+        retries=3,
+        delay=5,
+        timeout=10
     )
 
-    avg_time_per_device = (
-        processing_time / attempted_devices
-        if attempted_devices > 0 else 0
+    # Procesar dispositivos en paralelo
+    await process_devices(
+        df=df,
+        valid_indexes=valid_indexes,
+        sms_service=sms_service,
+        metrics=metrics,
+        max_concurrent_sms=MAX_CONCURRENT_SMS,
+        num_workers=NUM_WORKERS
     )
 
-    logger.info("==== RESUMEN DE EJECUCIÓN ====")
-    logger.info(f"Tiempo total ejecución: {total_time:.2f} segundos")
-    logger.info(f"Tiempo procesamiento SMS: {processing_time:.2f} segundos")
-    logger.info(f"Exitosos: {success_counter}")
-    logger.info(f"Dispositivos inoperativos: {inoperative_counter}")
-    logger.info(f"Errores ejecución: {execution_errors}")
-    logger.info(f"No soportados: {unsupported_counter}")
-    logger.info(f"Porcentaje éxito: {success_rate:.2f}%")
-    logger.info(f"Tiempo promedio por dispositivo: {avg_time_per_device:.2f} s")
-
-    logger.info("==== FIN DE EJECUCIÓN ====")
-
+    # Guardar Excel actualizado
     save_devices(df, EXCEL_PATH)
+    
+    # Dejamos de contar el tiempo
+    end_time = time.perf_counter()
+
+    # Calcular métricas de tiempo
+    total_time = end_time - start_time
+    total_processed = len(valid_indexes)
+
+    throughput = total_processed / total_time if total_time > 0 else 0
+    avg_time = total_time / total_processed if total_processed > 0 else 0
+
+    # Mostrar métricas finales
+    summary = metrics.summary()
+    print("\n")
+    logger.info("----- RESUMEN FINAL -----")
+    logger.info(f"Exitosos: {summary['success']}")
+    logger.info(f"Errores: {summary['errors']}")
+    logger.info(f"No soportados: {summary['unsupported']}")
+    logger.info(f"Inoperativos: {summary['inoperative']}")
+    logger.info(f"Tasa éxito: {summary['success_rate']}%")    
+    logger.info("----- MÉTRICAS DE RENDIMIENTO -----")
+    logger.info(f"Tiempo total: {total_time:.2f} segundos")
+    logger.info(f"Tiempo promedio por dispositivo: {avg_time:.2f} segundos")
+    logger.info(f"Throughput: {throughput:.2f} dispositivos/segundo")
+    logger.info(f"Workers utilizados: {NUM_WORKERS}")                       
+    logger.info("============FIN DE EJECUCIÓN===========")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(async_main())

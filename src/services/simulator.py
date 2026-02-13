@@ -1,16 +1,17 @@
 import random
-import time
+import asyncio
+from loguru import logger
 
 
 class TimeoutException(Exception):
     pass
 
 
-def send_sms(phone: str, message: str) -> str:
+async def send_sms(phone: str, message: str) -> str:
     print(f"Enviando SMS a {phone}: {message}")
-
-    # Simular latencia real
-    time.sleep(random.uniform(0.5, 2.0))
+    logger.debug(f"Tipo de send_sms: {type(send_sms)}")
+    # Simular latencia real sin bloquear el event loop
+    await asyncio.sleep(random.uniform(0.5, 2.0))
 
     probability = random.random()
 
