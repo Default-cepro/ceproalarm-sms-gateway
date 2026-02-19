@@ -1,6 +1,6 @@
 import asyncio
 from loguru import logger
-from .simulator import send_sms, TimeoutException
+from ..api.server import send_command_and_wait
 from ..core.parser import parse_response
 
 
@@ -14,28 +14,29 @@ class SMSService:
     async def send_with_retry(self, phone: str, message: str, expected: str) -> str:
         attempt = 0
 
+        # función de match basada en el expected del JSON
+        def match_fn(response_text: str) -> bool:
+            return expected in (response_text or "")
+
         while attempt < self.retries:
             try:
                 logger.debug(f"Enviando intento {attempt + 1}/{self.retries} a {phone}")
-                # Timeout controlado
-                response = await asyncio.wait_for(
-                    send_sms(phone, message),
+
+                response = await send_command_and_wait(
+                    to=phone,
+                    text=message,
+                    match_fn=match_fn,
                     timeout=self.timeout
                 )
 
-                status = parse_response(response, expected)
+                raw_message = response.get("message", "")
+                status = parse_response(raw_message, expected)
                 return status
-
-            except TimeoutException:
-                attempt += 1
-                logger.warning(f"Timeout en intento {attempt}/{self.retries} para {phone}")
-                print("\n")
 
             except asyncio.TimeoutError:
                 attempt += 1
-                logger.warning(f"Timeout asyncio en intento {attempt}/{self.retries} para {phone}")
-                print("\n")
-                
+                logger.warning(f"Timeout en intento {attempt}/{self.retries} para {phone}")
+
             except Exception as e:
                 logger.error(f"Error inesperado con {phone}: {e}")
                 raise
@@ -43,5 +44,4 @@ class SMSService:
             if attempt < self.retries:
                 await asyncio.sleep(self.delay)
 
-        # Si agotó reintentos
-        raise TimeoutException(f"Dispositivo {phone} no respondió tras {self.retries} intentos")
+        raise Exception(f"Dispositivo {phone} no respondió tras {self.retries} intentos")
