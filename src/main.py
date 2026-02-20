@@ -21,7 +21,7 @@ from .services.queue_manager import process_devices
 # Configuración
 EXCEL_PATH = Path(__file__).resolve().parents[1] / "data" / "localizadores.xlsx"
 
-NUM_WORKERS = 3
+NUM_WORKERS = 1
 MAX_CONCURRENT_SMS = 1
 
 
@@ -34,8 +34,8 @@ async def start_uvicorn_in_background(app_obj, host="0.0.0.0", port=80):
     server = uvicorn.Server(config=config)
     # server.serve() es una coroutine que ejecuta el server; la lanzamos como tarea
     server_task = asyncio.create_task(server.serve())
-    # esperar un breve momento para que el server inicialice (puedes incrementar si tu máquina es lenta)
-    await asyncio.sleep(0.5)
+    # esperar un breve momento para que el server inicialice
+    await asyncio.sleep(1)
     return server, server_task
 
 
@@ -51,10 +51,32 @@ async def async_main():
     # IMPORTANTE: arrancamos el servidor en el *mismo* loop para que
     # las asyncio.Queue y futures definidas en server_module funcionen con SMSService.
     uvicorn_host = "0.0.0.0"
-    uvicorn_port = 80  # ajusta a 80 si quieres y tienes permisos, o deja 8000 para dev
+    uvicorn_port = 80
 
     logger.info(f"Arrancando FastAPI (uvicorn) en {uvicorn_host}:{uvicorn_port} (background)...")
     server, server_task = await start_uvicorn_in_background(server_module.app, host=uvicorn_host, port=uvicorn_port)
+
+    # ------------------- ESPERAR PRIMER LLAMADO DE LA APP -------------------
+    # El servidor expondrá `first_request_event` (asyncio.Event) en server_module.
+    # Aquí esperamos que la app (teléfono) haga la primera llamada (registro o poll)
+    # antes de iniciar los workers/procesamiento. Si pasa timeout_seconds procedemos
+    # (pero queda registrado en el log).
+    timeout_seconds = 300  # segundos
+    try:
+        if hasattr(server_module, "first_request_event"):
+            if timeout_seconds and timeout_seconds > 0:
+                logger.info(f"Esperando primer llamado de la app (timeout={timeout_seconds}s)...")
+                await asyncio.wait_for(server_module.first_request_event.wait(), timeout=timeout_seconds)
+            else:
+                logger.info("Esperando primer llamado de la app (sin timeout)...")
+                await server_module.first_request_event.wait()
+            logger.info("Primer llamado recibido: arrancando workers y procesamiento.")
+        else:
+            logger.warning("server_module.first_request_event no existe — procediendo sin espera.")
+    except asyncio.TimeoutError:
+        logger.warning(f"No se recibió primer llamado en {timeout_seconds}s — procediendo según configuración.")
+    except Exception as ex:
+        logger.exception("Error esperando primer llamado de la app: %s", ex)
 
     # Cargar Excel
     df = load_devices(EXCEL_PATH)
@@ -80,14 +102,14 @@ async def async_main():
     logger.info(f"{len(valid_indexes)} dispositivos válidos")
     logger.warning(f"{metrics.unsupported} dispositivos no soportados")
 
-    # Crear servicio SMS (usa send_command_and_wait de server_module internamente)
+    # Crear servicio SMS
     sms_service = SMSService(
-        retries=3,
-        delay=5,
-        timeout=10
+        retries=1,
+        delay=30,
+        timeout=30
     )
 
-    # Procesar dispositivos en paralelo (usa tus workers actuales)
+    # Procesar dispositivos en paralelo 
     await process_devices(
         df=df,
         valid_indexes=valid_indexes,

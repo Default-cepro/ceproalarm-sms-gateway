@@ -7,6 +7,14 @@
             }
         }
     },
+    "TOPFLY": {
+        "PionnerX 100": {
+            "status": {
+                "command": "STATUS,0000#",
+                "expected": "STATUS OK"
+            }
+        }
+    },
     "gsm": {
         "it-443": {
             "status": {
