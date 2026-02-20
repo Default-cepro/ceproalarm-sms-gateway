@@ -8,7 +8,6 @@ import time
 import uuid
 import re
 from typing import Dict, Any, List, Optional, Callable
-from contextlib import asynccontextmanager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -358,19 +357,3 @@ async def admin_send_command(request: Request):
         return JSONResponse(status_code=200, content={"status": "ok", "response": res})
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="timeout waiting for response")
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    task = asyncio.create_task(incoming_sms_worker())
-    yield
-    task.cancel()
-
-app = FastAPI(lifespan=lifespan)
-
-async def incoming_sms_worker():
-    while True:
-        sms = await incoming_sms_queue.get()
-        logging.info("Worker procesando SMS inbound: %s", sms)
-
-        # Aquí conectaremos con tu queue_manager
-        # Por ahora solo log
