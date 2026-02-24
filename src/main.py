@@ -186,7 +186,7 @@ async def async_main():
     sms_service = SMSService(
         retries=1,
         delay=30,
-        timeout=30
+        timeout=20
     )
 
     # Procesar dispositivos en paralelo 

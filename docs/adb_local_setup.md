@@ -18,6 +18,7 @@ Este flujo evita depender de la red local del telefono y usa tuneles ADB:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\tools\setup_adb_local_webhooks.ps1 `
+  -AdbSerial "JBV489BM5PCAE6EM" `
   -Username "sms" `
   -Password "<LOCAL_SERVER_PASSWORD>" `
   -ServerPort 80
@@ -29,6 +30,7 @@ Parametros opcionales:
 - `-ServerPort` puerto donde corre tu FastAPI local.
 - `-ReversePort` default `9876` (telefono -> PC).
 - `-ForwardPort` default `18080` (PC -> telefono).
+
 
 ## Que hace el script
 

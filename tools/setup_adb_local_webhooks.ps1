@@ -8,7 +8,8 @@ param(
     [int]$ReversePort = 9876,
     [int]$ServerPort = 80,
     [string]$WebhookPath = "/webhook/sms/events",
-    [string[]]$Events = @("sms:received", "sms:sent", "sms:delivered", "sms:failed")
+    [string[]]$Events = @("sms:received", "sms:sent", "sms:delivered", "sms:failed"),
+    [switch]$SkipEnvUpdate
 )
 
 function Build-AdbArgs {
@@ -25,6 +26,27 @@ function Run-Adb {
     if ($LASTEXITCODE -ne 0) {
         throw "adb command failed: adb $($CommandArgs -join ' ')"
     }
+}
+
+function Set-Or-AppendEnvLine {
+    param(
+        [string[]]$Lines,
+        [string]$Key,
+        [string]$Value
+    )
+    $prefix = "$Key="
+    $updated = $false
+    for ($i = 0; $i -lt $Lines.Count; $i++) {
+        if ($Lines[$i].StartsWith($prefix)) {
+            $Lines[$i] = "$prefix$Value"
+            $updated = $true
+            break
+        }
+    }
+    if (-not $updated) {
+        $Lines += "$prefix$Value"
+    }
+    return ,$Lines
 }
 
 function Try-GetEndpoint {
@@ -91,14 +113,18 @@ Write-Host "Endpoint API detectado: $endpoint"
 
 Write-Host "4.1) Precheck de disponibilidad local API..."
 try {
-    $health = Invoke-WebRequest -Method Get -Uri "$forwardBase/" -Headers $headers -TimeoutSec 8
-    Write-Host "Local API reachable: $($health.StatusCode)"
+    $healthCode = & curl.exe -s -o NUL -w "%{http_code}" -u "$Username`:$Password" "$forwardBase/"
+    if ($healthCode -eq "200") {
+        Write-Host "Local API reachable: 200"
+    }
+    else {
+        Write-Host ("Precheck retorno HTTP {0}, se continua con registro para confirmar." -f $healthCode) -ForegroundColor Yellow
+    }
 }
 catch {
     $detail = $_.Exception.Message
-    Write-Host ("[ERROR] Local API no disponible en {0}: {1}" -f $forwardBase, $detail) -ForegroundColor Red
-    Write-Host "Sugerencia: en la app deja activado SOLO Local server, espera 5-10s, y vuelve a ejecutar este script." -ForegroundColor Yellow
-    throw
+    Write-Host ("Precheck no concluyente en {0}: {1}" -f $forwardBase, $detail) -ForegroundColor Yellow
+    Write-Host "Se continua con registro para validar conectividad real del endpoint /webhooks." -ForegroundColor Yellow
 }
 
 Write-Host "5) Registrando webhooks locales en telefono..."
@@ -128,6 +154,21 @@ try {
 }
 catch {
     Write-Host ("No se pudo listar webhooks: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+}
+
+if (-not $SkipEnvUpdate) {
+    Write-Host "7) Actualizando .env para modo local API..."
+    $envPath = ".env"
+    $lines = @()
+    if (Test-Path $envPath) {
+        $lines = Get-Content $envPath
+    }
+    $lines = Set-Or-AppendEnvLine -Lines $lines -Key "SMS_GATE_LOCAL_API_ENABLED" -Value "1"
+    $lines = Set-Or-AppendEnvLine -Lines $lines -Key "SMS_GATE_LOCAL_API_BASE_URL" -Value "http://127.0.0.1:$ForwardPort"
+    $lines = Set-Or-AppendEnvLine -Lines $lines -Key "SMS_GATE_LOCAL_API_USERNAME" -Value $Username
+    $lines = Set-Or-AppendEnvLine -Lines $lines -Key "SMS_GATE_LOCAL_API_PASSWORD" -Value $Password
+    Set-Content -Path $envPath -Value $lines -Encoding UTF8
+    Write-Host "Archivo .env actualizado para este dispositivo."
 }
 
 Write-Host ""

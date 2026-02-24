@@ -18,10 +18,20 @@ from datetime import datetime, timezone
 
 # Load .env if available so webhook settings work in local dev without shell exports.
 try:
-    from dotenv import load_dotenv  # type: ignore
-    load_dotenv()
+    from dotenv import load_dotenv as _dotenv_load  # type: ignore
 except Exception:
-    pass
+    _dotenv_load = None
+
+
+def _reload_env():
+    if _dotenv_load:
+        try:
+            _dotenv_load(override=True)
+        except Exception:
+            pass
+
+
+_reload_env()
 
 # evento para que main espere el primer request
 first_request_event: asyncio.Event = asyncio.Event()
@@ -61,6 +71,20 @@ SMS_GATE_LOCAL_API_ENABLED = _env_bool("SMS_GATE_LOCAL_API_ENABLED", default=Fal
 SMS_GATE_LOCAL_API_BASE_URL = os.getenv("SMS_GATE_LOCAL_API_BASE_URL", "http://127.0.0.1:18080").strip().rstrip("/")
 SMS_GATE_LOCAL_API_USERNAME = os.getenv("SMS_GATE_LOCAL_API_USERNAME", "sms").strip()
 SMS_GATE_LOCAL_API_PASSWORD = os.getenv("SMS_GATE_LOCAL_API_PASSWORD", "")
+
+
+def _get_local_api_runtime_config() -> Dict[str, Any]:
+    _reload_env()
+    enabled = _env_bool("SMS_GATE_LOCAL_API_ENABLED", default=SMS_GATE_LOCAL_API_ENABLED)
+    base_url = os.getenv("SMS_GATE_LOCAL_API_BASE_URL", SMS_GATE_LOCAL_API_BASE_URL).strip().rstrip("/")
+    username = os.getenv("SMS_GATE_LOCAL_API_USERNAME", SMS_GATE_LOCAL_API_USERNAME).strip()
+    password = os.getenv("SMS_GATE_LOCAL_API_PASSWORD", SMS_GATE_LOCAL_API_PASSWORD)
+    return {
+        "enabled": enabled,
+        "base_url": base_url,
+        "username": username,
+        "password": password,
+    }
 
 # try to import dateutil parser for robust ISO parsing; fallback later
 try:
@@ -108,6 +132,48 @@ def normalize_phone(phone: Optional[str]) -> str:
         return ""
     s = "".join(ch for ch in phone if ch.isdigit())
     return s
+
+
+def _phone_variants(phone: Optional[str]) -> Set[str]:
+    """
+    Genera variantes comparables para tolerar diferencias comunes:
+    - con/sin cero inicial
+    - con/sin prefijo de país (p.ej. 58)
+    - últimos 10 dígitos
+    """
+    raw = normalize_phone(phone)
+    if not raw:
+        return set()
+
+    variants: Set[str] = set()
+    queue = [raw]
+    while queue:
+        item = queue.pop()
+        if not item or item in variants:
+            continue
+        variants.add(item)
+
+        no_leading = item.lstrip("0")
+        if no_leading and no_leading not in variants:
+            queue.append(no_leading)
+
+        if item.startswith("58") and len(item) > 10:
+            without_cc = item[2:]
+            if without_cc and without_cc not in variants:
+                queue.append(without_cc)
+
+        if len(item) >= 10:
+            variants.add(item[-10:])
+
+    return variants
+
+
+def phones_equivalent(a: Optional[str], b: Optional[str]) -> bool:
+    va = _phone_variants(a)
+    vb = _phone_variants(b)
+    if not va or not vb:
+        return False
+    return not va.isdisjoint(vb)
 
 def _parse_iso_to_epoch(iso_str: str) -> Optional[int]:
     """Parsea una cadena ISO con zona a epoch (segundos). Devuelve None si falla."""
@@ -311,7 +377,8 @@ async def send_command_via_local_api_and_wait(
 ) -> Dict[str, Any]:
     if not to or not text:
         raise ValueError("to and text required")
-    if not SMS_GATE_LOCAL_API_ENABLED:
+    runtime_cfg = _get_local_api_runtime_config()
+    if not runtime_cfg["enabled"]:
         raise RuntimeError("SMS_GATE_LOCAL_API_ENABLED is false")
 
     cmd_id = str(uuid.uuid4())[:8]
@@ -328,12 +395,24 @@ async def send_command_via_local_api_and_wait(
             "message": text,
             "phoneNumbers": [to],
         }
-        url = f"{SMS_GATE_LOCAL_API_BASE_URL}/message"
-        auth = httpx.BasicAuth(username=SMS_GATE_LOCAL_API_USERNAME, password=SMS_GATE_LOCAL_API_PASSWORD)
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            res = await client.post(url, auth=auth, json=body)
-            if res.status_code >= 400:
-                raise RuntimeError(f"Local API send failed status={res.status_code} body={res.text[:500]}")
+        url = f"{runtime_cfg['base_url']}/message"
+        auth = httpx.BasicAuth(username=runtime_cfg["username"], password=runtime_cfg["password"])
+        send_error = None
+        for send_attempt in range(1, 4):
+            try:
+                async with httpx.AsyncClient(timeout=15.0, trust_env=False) as client:
+                    res = await client.post(url, auth=auth, json=body)
+                if res.status_code >= 400:
+                    raise RuntimeError(f"Local API send failed status={res.status_code} body={res.text[:500]}")
+                send_error = None
+                break
+            except Exception as ex:
+                send_error = ex
+                logging.warning("Local API send attempt %s failed for %s: %s", send_attempt, to, ex)
+                if send_attempt < 3:
+                    await asyncio.sleep(0.5)
+        if send_error is not None:
+            raise send_error
         result = await asyncio.wait_for(fut, timeout=timeout)
         return result
     finally:
@@ -349,25 +428,31 @@ async def _handle_incoming_and_try_match(parsed: Dict[str, Any]):
     logging.info("Handling inbound for matching: from=%s msg=%s", norm, message_text[:120])
     if not norm:
         return
-    entries = pending_commands.get(norm, [])
-    for e in list(entries):
-        match_fn = e.get("match_fn")
-        try:
-            matched = False
-            if match_fn:
-                try:
-                    matched = bool(match_fn(message_text))
-                except Exception as ex:
-                    logging.warning("match_fn error: %s", ex)
-                    matched = False
-            else:
-                matched = True
-            if matched and not e["future"].done():
-                e["future"].set_result({"from": phone, "message": message_text, "raw": parsed})
-                logging.info("Resolved pending command %s for %s", e["id"], norm)
-                break
-        except Exception as ex:
-            logging.exception("Error while matching pending command: %s", ex)
+    candidate_keys = []
+    for key in list(pending_commands.keys()):
+        if phones_equivalent(key, norm):
+            candidate_keys.append(key)
+
+    for key in candidate_keys:
+        entries = pending_commands.get(key, [])
+        for e in list(entries):
+            match_fn = e.get("match_fn")
+            try:
+                matched = False
+                if match_fn:
+                    try:
+                        matched = bool(match_fn(message_text))
+                    except Exception as ex:
+                        logging.warning("match_fn error: %s", ex)
+                        matched = False
+                else:
+                    matched = True
+                if matched and not e["future"].done():
+                    e["future"].set_result({"from": phone, "message": message_text, "raw": parsed})
+                    logging.info("Resolved pending command %s for inbound=%s pending_key=%s", e["id"], norm, key)
+                    return
+            except Exception as ex:
+                logging.exception("Error while matching pending command: %s", ex)
 
 # ---------- Endpoints ----------
 
