@@ -1,0 +1,24 @@
+{
+    "brandA1": {
+        "modelA1": {
+            "status": {
+                "command": "STATUSA1",
+                "expected": "STATUSA1:OK"
+            }
+        }
+    },
+    "brandB1": {
+        "modelB1": {
+            "status": {
+                "command": "STATUSB1",
+                "expected": "B1:OK"
+            }
+        },
+        "modelB2": {
+            "status": {
+                "command": "STATUS",
+                "expected":"OK"
+            }
+        }
+    }
+}

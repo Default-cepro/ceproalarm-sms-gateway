@@ -1,6 +1,7 @@
 #Personales
 tests/
-data/
+data/localizadores.xlsx
+config/commands.json
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

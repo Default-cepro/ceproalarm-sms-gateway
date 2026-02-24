@@ -44,31 +44,29 @@ async def start_uvicorn_in_background(app_obj, host="0.0.0.0", port=80):
     """
     config = uvicorn.Config(app=app_obj, host=host, port=port, log_level="info")
     server = uvicorn.Server(config=config)
-    # server.serve() es una coroutine que ejecuta el server; la lanzamos como tarea
+    # server.serve() as a co-task
     server_task = asyncio.create_task(server.serve())
-    # esperar un breve momento para que el server inicialice
+    # wait for the server to initialize 
     await asyncio.sleep(1)
     return server, server_task
 
 
 async def async_main():
-    # Empezamos a contar el tiempo
+    # Started counting time 
     start_time = time.perf_counter()
 
     logger = setup_logger()
     logger.info("==========INICIO DE EJECUCIÓN==========")
     logger.info("Iniciando procesamiento de dispositivos")
 
-    # -------------- Arrancar el servidor (compartir colas/futuros) --------------
-    # IMPORTANTE: arrancamos el servidor en el *mismo* loop para que
-    # las asyncio.Queue y futures definidas en server_module funcionen con SMSService.
+    # -------------- BOOT THE SERVER --------------
     uvicorn_host = "0.0.0.0"
     uvicorn_port = 80
 
     logger.info(f"Arrancando FastAPI (uvicorn) en {uvicorn_host}:{uvicorn_port} (background)...")
     server, server_task = await start_uvicorn_in_background(server_module.app, host=uvicorn_host, port=uvicorn_port)
 
-    # ------------------- Registro opcional de webhooks Cloud -------------------
+    # ------------------- Optional register of webhooks Cloud -------------------
     auto_register_webhooks = _env_bool("SMS_GATE_AUTO_REGISTER_WEBHOOKS", default=False)
     unregister_on_exit = _env_bool("SMS_GATE_UNREGISTER_ON_EXIT", default=False)
     cloud_api_url = os.getenv("SMS_GATE_API_URL", "https://api.sms-gate.app/3rdparty/v1").strip()
@@ -127,16 +125,16 @@ async def async_main():
                     "(no usar login de /webhook/sms/device)."
                 )
 
-    # ------------------- ESPERAR PRIMER LLAMADO DE LA APP -------------------
-    # El servidor expondrá `first_request_event` (asyncio.Event) en server_module.
-    # Aquí esperamos que la app (teléfono) haga la primera llamada (registro o poll)
-    # antes de iniciar los workers/procesamiento. Si pasa timeout_seconds procedemos
-    # (pero queda registrado en el log).
+    # ------------------- WAIT FOR FIRST APP CALL -------------------
+    # The server will expose `first_request_event` (asyncio.Event) in server_module.
+    # Here we wait for the app (phone) do the first call (register o poll)
+    # before starting workers/processing. If timeout_seconds pass we proceed
+    # (but it is recorded in the log).
     local_api_mode = _env_bool("SMS_GATE_LOCAL_API_ENABLED", default=False)
     if local_api_mode:
         logger.info("SMS_GATE_LOCAL_API_ENABLED=1 -> omitiendo espera de primer llamado (/device|/message polling).")
     else:
-        timeout_seconds = 300  # segundos
+        timeout_seconds = 300 
         try:
             if hasattr(server_module, "first_request_event"):
                 if timeout_seconds and timeout_seconds > 0:
@@ -153,10 +151,10 @@ async def async_main():
         except Exception as ex:
             logger.exception("Error esperando primer llamado de la app: %s", ex)
 
-    # Cargar Excel
+    # Load excel
     df = load_devices(EXCEL_PATH)
 
-    # Limpiar columna Estado y Error en cada corrida para un diagnóstico nuevo.
+    # Clean up "Estado" and "Error" columns in each execution
     if "Estado" not in df.columns:
         df["Estado"] = ""
     else:
@@ -167,13 +165,13 @@ async def async_main():
     else:
         df["Error"] = ""
 
-    # Crear métricas
+    # Make the metrics
     metrics = Metrics()
 
-    # Validar dispositivos
+    # Validate devices
     valid_indexes, invalid_devices = validate_devices(df, COMMANDS)
 
-    # Marcar no soportados desde validación
+    # Mark unsupported from validation
     for index, error_message in invalid_devices:
         metrics.unsupported += 1
         df.at[index, "Estado"] = "NO SOPORTADO"
@@ -182,14 +180,14 @@ async def async_main():
     logger.info(f"{len(valid_indexes)} dispositivos válidos")
     logger.warning(f"{metrics.unsupported} dispositivos no soportados")
 
-    # Crear servicio SMS
+    # Make a SMS service
     sms_service = SMSService(
         retries=1,
         delay=30,
         timeout=20
     )
 
-    # Procesar dispositivos en paralelo 
+    # Process divices in parallel 
     await process_devices(
         df=df,
         valid_indexes=valid_indexes,
@@ -199,20 +197,20 @@ async def async_main():
         num_workers=NUM_WORKERS
     )
 
-    # Guardar Excel actualizado
+    # Save Updated Excel
     save_devices(df, EXCEL_PATH)
 
-    # Dejamos de contar el tiempo
+    # Stop counting the time
     end_time = time.perf_counter()
 
-    # Calcular métricas de tiempo
+    # We calculate time metrics
     total_time = end_time - start_time
     total_processed = len(valid_indexes)
 
     throughput = total_processed / total_time if total_time > 0 else 0
     avg_time = total_time / total_processed if total_processed > 0 else 0
 
-    # Mostrar métricas finales
+    # Show final metrics
     summary = metrics.summary()
     print("\n")
     logger.info("----- RESUMEN FINAL -----")
@@ -228,7 +226,7 @@ async def async_main():
     logger.info(f"Workers utilizados: {NUM_WORKERS}")
     logger.info("============FIN DE EJECUCIÓN===========")
 
-    # -------------- Apagado del server uvicorn --------------
+    # -------------- Shut down uvicorn server --------------
     logger.info("Deteniendo servidor uvicorn...")
 
     if auto_register_webhooks and unregister_on_exit and registered_webhook_ids:
@@ -248,9 +246,9 @@ async def async_main():
                 )
             )
 
-    # Solicitar salida limpia del servidor
+    # Request clean exit from server
     server.should_exit = True
-    # Esperar que la tarea termine (timeout opcional)
+    # Wait for the task to finish (optional timeout)
     try:
         await asyncio.wait_for(server_task, timeout=10.0)
     except asyncio.TimeoutError:
