@@ -1,4 +1,3 @@
-# src/api/server.py  (actualizado)
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 import json
