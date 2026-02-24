@@ -1,7 +1,5 @@
-
-
-def parse_response(response: str, expected: str) -> str:
-    if expected in response:
-        return "ONLINE"
-
-    return "INOPERATIVO"
+def parse_response(response: str, expected: str) -> bool:
+    """
+    Devuelve True si la respuesta contiene el patrón esperado.
+    """
+    return (expected or "").strip().lower() in (response or "").strip().lower()

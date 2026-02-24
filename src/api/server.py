@@ -8,8 +8,20 @@ import logging
 import time
 import uuid
 import re
-from typing import Dict, Any, List, Optional, Callable
+import os
+import hmac
+import hashlib
+import httpx
+from collections import deque
+from typing import Dict, Any, List, Optional, Callable, Set
 from datetime import datetime, timezone
+
+# Load .env if available so webhook settings work in local dev without shell exports.
+try:
+    from dotenv import load_dotenv  # type: ignore
+    load_dotenv()
+except Exception:
+    pass
 
 # evento para que main espere el primer request
 first_request_event: asyncio.Event = asyncio.Event()
@@ -23,6 +35,32 @@ outgoing_messages: asyncio.Queue = asyncio.Queue()
 registered_devices: Dict[str, Dict[str, Any]] = {}
 pending_commands: Dict[str, List[Dict[str, Any]]] = {}
 message_statuses: Dict[str, Dict[str, Any]] = {}
+recent_delivery_ids_order: deque = deque()
+recent_delivery_ids_set: Set[str] = set()
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name, "1" if default else "0")
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int, min_value: int = 0) -> int:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = default
+    return max(min_value, value)
+
+
+SMS_GATE_SIGNING_KEY = os.getenv("SMS_GATE_WEBHOOK_SIGNING_KEY", "").strip()
+SMS_GATE_REQUIRE_SIGNATURE = _env_bool("SMS_GATE_REQUIRE_SIGNATURE", default=False)
+SMS_GATE_TIMESTAMP_TOLERANCE_SECONDS = _env_int("SMS_GATE_TIMESTAMP_TOLERANCE_SECONDS", 300, min_value=0)
+SMS_GATE_MAX_TRACKED_DELIVERIES = _env_int("SMS_GATE_MAX_TRACKED_DELIVERIES", 5000, min_value=100)
+SMS_GATE_LOCAL_API_ENABLED = _env_bool("SMS_GATE_LOCAL_API_ENABLED", default=False)
+SMS_GATE_LOCAL_API_BASE_URL = os.getenv("SMS_GATE_LOCAL_API_BASE_URL", "http://127.0.0.1:18080").strip().rstrip("/")
+SMS_GATE_LOCAL_API_USERNAME = os.getenv("SMS_GATE_LOCAL_API_USERNAME", "sms").strip()
+SMS_GATE_LOCAL_API_PASSWORD = os.getenv("SMS_GATE_LOCAL_API_PASSWORD", "")
 
 # try to import dateutil parser for robust ISO parsing; fallback later
 try:
@@ -32,7 +70,7 @@ except Exception:
     _HAS_DATEUTIL = False
 
 # ---------- Helpers ----------
-def parse_body_bytes(raw: bytes, content_type: str) -> Dict[str, Any]:
+def parse_body_bytes(raw: bytes, content_type: str) -> Any:
     try:
         s = raw.decode("utf-8") if raw else ""
     except Exception:
@@ -96,6 +134,152 @@ def _parse_iso_to_epoch(iso_str: str) -> Optional[int]:
     except Exception:
         return None
 
+
+def _load_app_state():
+    try:
+        import importlib
+        try:
+            mod = importlib.import_module("src.core.app_state")
+            return getattr(mod, "app_state", None)
+        except Exception:
+            try:
+                mod = importlib.import_module("core.app_state")
+                return getattr(mod, "app_state", None)
+            except Exception:
+                return None
+    except Exception:
+        return None
+
+
+def _touch_first_request_event(source: str):
+    try:
+        if not first_request_event.is_set():
+            first_request_event.set()
+            logging.info("first_request_event set by %s", source)
+    except Exception:
+        logging.exception("Error setting first_request_event from %s", source)
+
+
+def _is_sms_gate_event(parsed: Any) -> bool:
+    return (
+        isinstance(parsed, dict)
+        and isinstance(parsed.get("event"), str)
+        and isinstance(parsed.get("payload"), dict)
+    )
+
+
+def _verify_sms_gate_signature(raw_body: bytes, request: Request) -> Optional[str]:
+    signature = (request.headers.get("x-signature") or "").strip()
+    timestamp = (request.headers.get("x-timestamp") or "").strip()
+
+    if not SMS_GATE_SIGNING_KEY:
+        if SMS_GATE_REQUIRE_SIGNATURE:
+            return "SMS_GATE_WEBHOOK_SIGNING_KEY is not configured on server"
+        return None
+
+    if not signature or not timestamp:
+        return "missing X-Signature or X-Timestamp header"
+
+    try:
+        timestamp_int = int(timestamp)
+    except Exception:
+        return "invalid X-Timestamp header"
+
+    now = int(time.time())
+    if abs(now - timestamp_int) > SMS_GATE_TIMESTAMP_TOLERANCE_SECONDS:
+        return "timestamp out of accepted range"
+
+    mac = hmac.new(SMS_GATE_SIGNING_KEY.encode("utf-8"), digestmod=hashlib.sha256)
+    mac.update(raw_body)
+    mac.update(timestamp.encode("utf-8"))
+    expected_signature = mac.hexdigest()
+
+    if not hmac.compare_digest(expected_signature, signature.lower()):
+        return "invalid signature"
+
+    return None
+
+
+def _remember_delivery(delivery_id: Optional[str]) -> bool:
+    if not delivery_id:
+        return True
+
+    if delivery_id in recent_delivery_ids_set:
+        return False
+
+    if len(recent_delivery_ids_order) >= SMS_GATE_MAX_TRACKED_DELIVERIES:
+        oldest = recent_delivery_ids_order.popleft()
+        recent_delivery_ids_set.discard(oldest)
+
+    recent_delivery_ids_order.append(delivery_id)
+    recent_delivery_ids_set.add(delivery_id)
+    return True
+
+
+async def _store_and_match_incoming(phone: Optional[str], message: Optional[str], parsed: Dict[str, Any]):
+    await incoming_sms_queue.put({"phone": phone, "message": message, "raw": parsed})
+
+    app_state = _load_app_state()
+    if app_state and getattr(app_state, "insert_incoming", None):
+        try:
+            app_state.insert_incoming(phone, message, parsed)
+        except Exception as ex:
+            logging.debug("Error saving incoming SMS to DB: %s", ex)
+
+    try:
+        await _handle_incoming_and_try_match(parsed)
+    except Exception as ex:
+        logging.exception("Error matching incoming SMS: %s", ex)
+
+
+def _update_status_from_sms_gate_event(event_name: str, payload: Dict[str, Any], envelope: Dict[str, Any]):
+    message_id = payload.get("messageId") or envelope.get("id") or str(uuid.uuid4())
+    phone = payload.get("phoneNumber")
+    reason = payload.get("reason")
+    now_ts = int(time.time())
+
+    current = message_statuses.get(message_id, {})
+    history = current.get("events", [])
+    if not isinstance(history, list):
+        history = []
+    history.append({
+        "event": event_name,
+        "phoneNumber": phone,
+        "reason": reason,
+        "received_at": now_ts
+    })
+    if len(history) > 20:
+        history = history[-20:]
+
+    state_map = {
+        "sms:sent": "sent",
+        "sms:delivered": "delivered",
+        "sms:failed": "failed"
+    }
+    state = state_map.get(event_name, event_name)
+
+    message_statuses[message_id] = {
+        "id": message_id,
+        "state": state,
+        "phoneNumber": phone,
+        "reason": reason,
+        "updated_at": now_ts,
+        "events": history,
+        "raw": envelope
+    }
+
+    app_state = _load_app_state()
+    if app_state and getattr(app_state, "save_status", None):
+        try:
+            app_state.save_status(message_id, message_statuses[message_id])
+        except Exception as ex:
+            logging.debug("Error saving status to DB: %s", ex)
+
+    if state == "failed":
+        logging.error("sms:failed for %s (message_id=%s): %s", phone, message_id, reason or "unknown")
+    else:
+        logging.info("Updated status from %s for %s (message_id=%s)", event_name, phone, message_id)
+
 # pending/command helpers
 async def send_command_and_wait(to: str, text: str, match_fn: Optional[Callable[[str], bool]] = None, timeout: int = 30) -> Dict[str, Any]:
     if not to or not text:
@@ -110,6 +294,46 @@ async def send_command_and_wait(to: str, text: str, match_fn: Optional[Callable[
     pending_commands.setdefault(key, []).append(entry)
     logging.info("Enqueued command %s for %s", cmd_id, key)
     try:
+        result = await asyncio.wait_for(fut, timeout=timeout)
+        return result
+    finally:
+        lst = pending_commands.get(key, [])
+        pending_commands[key] = [e for e in lst if e["id"] != cmd_id]
+        if not pending_commands.get(key):
+            pending_commands.pop(key, None)
+
+
+async def send_command_via_local_api_and_wait(
+    to: str,
+    text: str,
+    match_fn: Optional[Callable[[str], bool]] = None,
+    timeout: int = 30,
+) -> Dict[str, Any]:
+    if not to or not text:
+        raise ValueError("to and text required")
+    if not SMS_GATE_LOCAL_API_ENABLED:
+        raise RuntimeError("SMS_GATE_LOCAL_API_ENABLED is false")
+
+    cmd_id = str(uuid.uuid4())[:8]
+    loop = asyncio.get_event_loop()
+    fut = loop.create_future()
+    key = normalize_phone(to)
+    entry = {"id": cmd_id, "future": fut, "match_fn": match_fn, "created_at": int(time.time()), "to": key}
+    pending_commands.setdefault(key, []).append(entry)
+    logging.info("Registered pending local-api command %s for %s", cmd_id, key)
+
+    try:
+        body = {
+            "id": cmd_id,
+            "message": text,
+            "phoneNumbers": [to],
+        }
+        url = f"{SMS_GATE_LOCAL_API_BASE_URL}/message"
+        auth = httpx.BasicAuth(username=SMS_GATE_LOCAL_API_USERNAME, password=SMS_GATE_LOCAL_API_PASSWORD)
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            res = await client.post(url, auth=auth, json=body)
+            if res.status_code >= 400:
+                raise RuntimeError(f"Local API send failed status={res.status_code} body={res.text[:500]}")
         result = await asyncio.wait_for(fut, timeout=timeout)
         return result
     finally:
@@ -153,46 +377,92 @@ async def root():
 
 @app.get("/webhook/sms")
 @app.get("/webhook/sms/")
+@app.get("/webhook/sms-received")
+@app.get("/webhook/sms-received/")
 async def validate():
     return success_payload()
 
+
+@app.get("/webhook/sms/events")
+@app.get("/webhook/sms/events/")
+async def validate_events():
+    return success_payload({"payload": {"source": "sms-gate-events"}})
+
 @app.post("/webhook/sms")
 @app.post("/webhook/sms/")
+@app.post("/webhook/sms/events")
+@app.post("/webhook/sms/events/")
+@app.post("/webhook/sms-received")
+@app.post("/webhook/sms-received/")
 async def receive_sms(request: Request):
+    _touch_first_request_event("POST /webhook/sms")
+
     raw = await request.body()
     ct = request.headers.get("content-type", "")
     parsed = parse_body_bytes(raw, ct)
-    logging.info("INCOMING /webhook/sms BODY: %s", parsed)
+    if not isinstance(parsed, dict):
+        logging.warning("INCOMING /webhook/sms invalid body: %s", raw)
+        return JSONResponse(status_code=400, content={"payload": {"success": False, "error": "invalid body"}})
+
+    # SMS Gateway app webhook envelope: {"event":"sms:received","payload":{...}, ...}
+    if _is_sms_gate_event(parsed):
+        signature_error = _verify_sms_gate_signature(raw, request)
+        if signature_error:
+            logging.warning("Rejected webhook by signature validation: %s", signature_error)
+            return JSONResponse(status_code=401, content={"payload": {"success": False, "error": signature_error}})
+
+        delivery_id = parsed.get("id")
+        if not _remember_delivery(delivery_id):
+            logging.info("Duplicate webhook delivery ignored (id=%s)", delivery_id)
+            return JSONResponse(status_code=200, content=success_payload({"payload": {"duplicate": True}}))
+
+        event_name = parsed.get("event")
+        payload = parsed.get("payload") or {}
+        logging.info("INCOMING SMS GATE EVENT event=%s id=%s payload=%s", event_name, delivery_id, payload)
+
+        if event_name in ("sms:received", "sms:data-received"):
+            phone = payload.get("phoneNumber")
+            message = payload.get("message")
+            if event_name == "sms:data-received":
+                # Keep base64 content as-is; parser/matcher can choose how to handle it.
+                message = payload.get("data") or message
+
+            normalized = {
+                "from": phone,
+                "sender": phone,
+                "phone": phone,
+                "message": message or "",
+                "text": message or "",
+                "body": message or "",
+                "messageId": payload.get("messageId"),
+                "simNumber": payload.get("simNumber"),
+                "receivedAt": payload.get("receivedAt"),
+                "event": event_name,
+                "deviceId": parsed.get("deviceId"),
+                "webhookId": parsed.get("webhookId"),
+                "deliveryId": delivery_id,
+                "raw_event": parsed
+            }
+            await _store_and_match_incoming(phone=phone, message=message, parsed=normalized)
+            return JSONResponse(status_code=200, content=success_payload({"payload": {"event": event_name}}))
+
+        if event_name in ("sms:sent", "sms:delivered", "sms:failed"):
+            _update_status_from_sms_gate_event(event_name, payload, parsed)
+            return JSONResponse(status_code=200, content=success_payload({"payload": {"event": event_name}}))
+
+        if event_name in ("mms:received", "system:ping"):
+            logging.info("Received event %s (ack only)", event_name)
+            return JSONResponse(status_code=200, content=success_payload({"payload": {"event": event_name}}))
+
+        logging.warning("Unknown webhook event ignored: %s", event_name)
+        return JSONResponse(status_code=200, content=success_payload({"payload": {"event": event_name, "ignored": True}}))
+
+    # Legacy format compatibility
+    logging.info("INCOMING /webhook/sms BODY (legacy): %s", parsed)
     phone = parsed.get("from") or parsed.get("sender") or parsed.get("phone")
     message = parsed.get("message") or parsed.get("text") or parsed.get("body")
-    # enqueue incoming
-    await incoming_sms_queue.put({"phone": phone, "message": message, "raw": parsed})
-    # attempt to store in DB if app_state available
-    try:
-        import importlib
-        app_state = None
-        try:
-            mod = importlib.import_module("src.core.app_state")
-            app_state = getattr(mod, "app_state", None)
-        except Exception:
-            try:
-                mod = importlib.import_module("core.app_state")
-                app_state = getattr(mod, "app_state", None)
-            except Exception:
-                app_state = None
-        if app_state and getattr(app_state, "insert_incoming", None):
-            try:
-                app_state.insert_incoming(phone, message, parsed)
-            except Exception as ex:
-                logging.debug("Error saving incoming SMS to DB: %s", ex)
-    except Exception:
-        pass
-
-    try:
-        await _handle_incoming_and_try_match(parsed)
-    except Exception as ex:
-        logging.exception("Error matching incoming SMS: %s", ex)
-    return JSONResponse(status_code=200, content=success_payload())
+    await _store_and_match_incoming(phone=phone, message=message, parsed=parsed)
+    return JSONResponse(status_code=200, content=success_payload({"payload": {"legacy": True}}))
 
 @app.api_route("/webhook/sms/device", methods=["POST", "PATCH", "PUT"])
 @app.api_route("/webhook/sms/device/", methods=["POST", "PATCH", "PUT"])

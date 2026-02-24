@@ -35,17 +35,19 @@ async def Worker(
                     expected
                 )
 
-            # Actualizar estado
-            df.at[index, "Estado"] = status
+            # Update status
+            final_status = status.get("status", "inoperativo")
+            error_code = status.get("error_code", "")
+            df.at[index, "Estado"] = final_status
+            df.at[index, "Error"] = error_code
 
-            if status == "ONLINE":
+            if final_status in ("operativo", "operativo sin respuesta esperada"):
                 metrics.success += 1
-                logger.success(f"{phone} ONLINE")
+                logger.success(f"{phone} {final_status}")
 
             else:
                 metrics.inoperative += 1
-                df.at[index, "Estado"] = "INOPERATIVO"
-                logger.warning(f"{phone} marcado INOPERATIVO")
+                logger.warning(f"{phone} marcado inoperativo (error={error_code or 'N/A'})")
                 
             print("\n")
 
@@ -53,8 +55,8 @@ async def Worker(
             metrics.errors += 1
             metrics.inoperative += 1
 
-            df.at[index, "Estado"] = "INOPERATIVO"
-            df.at[index, "Error"] = str(e)
+            df.at[index, "Estado"] = "inoperativo"
+            df.at[index, "Error"] = "UNHANDLED_EXCEPTION"
 
             logger.error(f"{phone} error final: {e}")
 

@@ -1,6 +1,7 @@
 import asyncio
+import os
 from loguru import logger
-from ..api.server import send_command_and_wait
+from ..api.server import send_command_and_wait, send_command_via_local_api_and_wait
 from ..core.parser import parse_response
 
 
@@ -10,28 +11,47 @@ class SMSService:
         self.retries = retries
         self.delay = delay
         self.timeout = timeout
+        raw = os.getenv("SMS_GATE_LOCAL_API_ENABLED", "0").strip().lower()
+        self.local_api_enabled = raw in {"1", "true", "yes", "on"}
+        if self.local_api_enabled:
+            logger.info("SMSService en modo local API directo (ADB/local server), sin polling cloud/private.")
 
-    async def send_with_retry(self, phone: str, message: str, expected: str) -> str:
+    async def send_with_retry(self, phone: str, message: str, expected: str) -> dict:
         attempt = 0
-
-        # función de match basada en el expected del JSON
-        def match_fn(response_text: str) -> bool:
-            return expected in (response_text or "")
 
         while attempt < self.retries:
             try:
                 logger.debug(f"Enviando intento {attempt + 1}/{self.retries} a {phone}")
 
-                response = await send_command_and_wait(
-                    to=phone,
-                    text=message,
-                    match_fn=match_fn,
-                    timeout=self.timeout
-                )
+                if self.local_api_enabled:
+                    response = await send_command_via_local_api_and_wait(
+                        to=phone,
+                        text=message,
+                        match_fn=None,  # Resolver con cualquier respuesta, luego evaluamos expected.
+                        timeout=self.timeout
+                    )
+                else:
+                    response = await send_command_and_wait(
+                        to=phone,
+                        text=message,
+                        match_fn=None,  # Resolver con cualquier respuesta, luego evaluamos expected.
+                        timeout=self.timeout
+                    )
 
                 raw_message = response.get("message", "")
-                status = parse_response(raw_message, expected)
-                return status
+                expected_ok = parse_response(raw_message, expected)
+                if expected_ok:
+                    return {
+                        "status": "operativo",
+                        "error_code": "",
+                        "raw_message": raw_message,
+                    }
+
+                return {
+                    "status": "operativo sin respuesta esperada",
+                    "error_code": "",
+                    "raw_message": raw_message,
+                }
 
             except asyncio.TimeoutError:
                 attempt += 1
@@ -44,4 +64,8 @@ class SMSService:
             if attempt < self.retries:
                 await asyncio.sleep(self.delay)
 
-        raise Exception(f"Dispositivo {phone} no respondió tras {self.retries} intentos")
+        return {
+            "status": "inoperativo",
+            "error_code": "NO_RESPONSE_TIMEOUT",
+            "raw_message": "",
+        }
