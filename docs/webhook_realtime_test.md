@@ -69,8 +69,3 @@ powershell -ExecutionPolicy Bypass -File .\tools\send_signed_test_event.ps1 `
 - El endpoint responde `200`.
 - En logs aparece `INCOMING SMS GATE EVENT event=sms:received`.
 - Si hay comando pendiente al mismo número, debe resolverse el `send_command_and_wait`.
-
-## Notas de modo
-
-- Tu app ya usa endpoints legacy (`/webhook/sms/message`, `/webhook/sms/device`, etc.) para polling y envío.
-- Los eventos webhook nuevos (`/webhook/sms/events`) no rompen ese flujo; funcionan en paralelo para recepción en tiempo real.
