@@ -242,6 +242,13 @@ def _verify_sms_gate_signature(raw_body: bytes, request: Request) -> Optional[st
             return "SMS_GATE_WEBHOOK_SIGNING_KEY is not configured on server"
         return None
 
+    # In local/ADB mode, incoming events can be unsigned. Only require headers
+    # when signature enforcement is explicitly enabled.
+    if not signature and not timestamp:
+        if SMS_GATE_REQUIRE_SIGNATURE:
+            return "missing X-Signature or X-Timestamp header"
+        return None
+
     if not signature or not timestamp:
         return "missing X-Signature or X-Timestamp header"
 

@@ -42,13 +42,13 @@ class SMSService:
                 expected_ok = parse_response(raw_message, expected)
                 if expected_ok:
                     return {
-                        "status": "operativo",
+                        "status": "ONLINE",
                         "error_code": "",
                         "raw_message": raw_message,
                     }
 
                 return {
-                    "status": "operativo sin respuesta esperada",
+                    "status": "UNKNOWN",
                     "error_code": "",
                     "raw_message": raw_message,
                 }
@@ -65,7 +65,7 @@ class SMSService:
                 await asyncio.sleep(self.delay)
 
         return {
-            "status": "inoperativo",
+            "status": "OFFLINE",
             "error_code": "NO_RESPONSE_TIMEOUT",
             "raw_message": "",
         }

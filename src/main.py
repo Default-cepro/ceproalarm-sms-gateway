@@ -1,6 +1,7 @@
 import asyncio
 import time
 import os
+import re
 from dotenv import load_dotenv
 from pathlib import Path
 
@@ -18,9 +19,9 @@ from .services.metrics import Metrics
 from .services.queue_manager import process_devices
 from .services.webhook_registry import register_cloud_webhooks, unregister_cloud_webhooks
 
-env_var = Path(__file__).resolve().parents[1] /".env"
+env_var = Path(__file__).resolve().parents[1] / ".env"
 load_dotenv(env_var)
-EXCEL_PATH = os.getenv("EXCEL_PATH")
+EXCEL_PATH = os.getenv("EXCEL_PATH", "")
 
 NUM_WORKERS = 1
 MAX_CONCURRENT_SMS = 1
@@ -37,6 +38,13 @@ def _env_events(name: str, default: str) -> list[str]:
     return [p for p in parts if p]
 
 
+def _parse_excel_paths(raw_value: str) -> list[str]:
+    if not raw_value:
+        return []
+    parts = [p.strip() for p in re.split(r"[;,]", raw_value) if p.strip()]
+    return parts
+
+
 async def start_uvicorn_in_background(app_obj, host="0.0.0.0", port=80):
     """
     Arranca uvicorn programáticamente en el mismo loop async como tarea.
@@ -44,29 +52,24 @@ async def start_uvicorn_in_background(app_obj, host="0.0.0.0", port=80):
     """
     config = uvicorn.Config(app=app_obj, host=host, port=port, log_level="info")
     server = uvicorn.Server(config=config)
-    # server.serve() as a co-task
     server_task = asyncio.create_task(server.serve())
-    # wait for the server to initialize 
     await asyncio.sleep(1)
     return server, server_task
 
 
 async def async_main():
-    # Started counting time 
     start_time = time.perf_counter()
 
     logger = setup_logger()
     logger.info("==========INICIO DE EJECUCIÓN==========")
     logger.info("Iniciando procesamiento de dispositivos")
 
-    # -------------- BOOT THE SERVER --------------
     uvicorn_host = "0.0.0.0"
     uvicorn_port = 80
 
     logger.info(f"Arrancando FastAPI (uvicorn) en {uvicorn_host}:{uvicorn_port} (background)...")
     server, server_task = await start_uvicorn_in_background(server_module.app, host=uvicorn_host, port=uvicorn_port)
 
-    # ------------------- Optional register of webhooks Cloud -------------------
     auto_register_webhooks = _env_bool("SMS_GATE_AUTO_REGISTER_WEBHOOKS", default=False)
     unregister_on_exit = _env_bool("SMS_GATE_UNREGISTER_ON_EXIT", default=False)
     cloud_api_url = os.getenv("SMS_GATE_API_URL", "https://api.sms-gate.app/3rdparty/v1").strip()
@@ -75,7 +78,7 @@ async def async_main():
     webhook_url = os.getenv("SMS_GATE_WEBHOOK_URL", "").strip()
     webhook_events = _env_events(
         "SMS_GATE_WEBHOOK_EVENTS",
-        "sms:received,sms:sent,sms:delivered,sms:failed"
+        "sms:received,sms:sent,sms:delivered,sms:failed",
     )
     device_id = os.getenv("SMS_GATE_DEVICE_ID", "").strip() or None
     registered_webhook_ids: list[str] = []
@@ -91,8 +94,7 @@ async def async_main():
 
         if missing_vars:
             logger.warning(
-                "Auto registro de webhooks activo pero faltan variables: "
-                + ", ".join(missing_vars)
+                "Auto registro de webhooks activo pero faltan variables: " + ", ".join(missing_vars)
             )
         else:
             logger.info(
@@ -125,16 +127,11 @@ async def async_main():
                     "(no usar login de /webhook/sms/device)."
                 )
 
-    # ------------------- WAIT FOR FIRST APP CALL -------------------
-    # The server will expose `first_request_event` (asyncio.Event) in server_module.
-    # Here we wait for the app (phone) do the first call (register o poll)
-    # before starting workers/processing. If timeout_seconds pass we proceed
-    # (but it is recorded in the log).
     local_api_mode = _env_bool("SMS_GATE_LOCAL_API_ENABLED", default=False)
     if local_api_mode:
         logger.info("SMS_GATE_LOCAL_API_ENABLED=1 -> omitiendo espera de primer llamado (/device|/message polling).")
     else:
-        timeout_seconds = 300 
+        timeout_seconds = 300
         try:
             if hasattr(server_module, "first_request_event"):
                 if timeout_seconds and timeout_seconds > 0:
@@ -145,72 +142,74 @@ async def async_main():
                     await server_module.first_request_event.wait()
                 logger.info("Primer llamado recibido: arrancando workers y procesamiento.")
             else:
-                logger.warning("server_module.first_request_event no existe — procediendo sin espera.")
+                logger.warning("server_module.first_request_event no existe - procediendo sin espera.")
         except asyncio.TimeoutError:
-            logger.warning(f"No se recibió primer llamado en {timeout_seconds}s — procediendo según configuración.")
+            logger.warning(f"No se recibió primer llamado en {timeout_seconds}s - procediendo según configuración.")
         except Exception as ex:
             logger.exception("Error esperando primer llamado de la app: %s", ex)
 
-    # Load excel
-    df = load_devices(EXCEL_PATH)
+    excel_paths = _parse_excel_paths(EXCEL_PATH)
+    if not excel_paths:
+        raise ValueError("EXCEL_PATH no está definido. Puedes colocar uno o varios archivos separados por ';' o ','.")
 
-    # Clean up "Estado" and "Error" columns in each execution
-    if "Estado" not in df.columns:
-        df["Estado"] = ""
-    else:
-        df["Estado"] = ""
-
-    if "Error" not in df.columns:
-        df["Error"] = ""
-    else:
-        df["Error"] = ""
-
-    # Make the metrics
     metrics = Metrics()
+    total_processed = 0
 
-    # Validate devices
-    valid_indexes, invalid_devices = validate_devices(df, COMMANDS)
-
-    # Mark unsupported from validation
-    for index, error_message in invalid_devices:
-        metrics.unsupported += 1
-        df.at[index, "Estado"] = "NO SOPORTADO"
-        df.at[index, "Error"] = error_message
-
-    logger.info(f"{len(valid_indexes)} dispositivos válidos")
-    logger.warning(f"{metrics.unsupported} dispositivos no soportados")
-
-    # Make a SMS service
     sms_service = SMSService(
-        retries=1,
-        delay=30,
-        timeout=20
-    )
+        retries=1, 
+        delay=30, 
+        timeout=30
+        )
 
-    # Process divices in parallel 
-    await process_devices(
-        df=df,
-        valid_indexes=valid_indexes,
-        sms_service=sms_service,
-        metrics=metrics,
-        max_concurrent_sms=MAX_CONCURRENT_SMS,
-        num_workers=NUM_WORKERS
-    )
+    for excel_path in excel_paths:
+        logger.info(f"Procesando archivo Excel: {excel_path}")
 
-    # Save Updated Excel
-    save_devices(df, EXCEL_PATH)
+        df = load_devices(excel_path, commands_config=COMMANDS)
+        if df.empty:
+            logger.warning(f"No se encontraron filas válidas con encabezados esperados en: {excel_path}")
+            continue
 
-    # Stop counting the time
+        if "Status" not in df.columns:
+            df["Status"] = ""
+        else:
+            df["Status"] = ""
+
+        # Mantenemos columna interna de Error para logs/proceso aunque el archivo no la tenga.
+        if "Error" not in df.columns:
+            df["Error"] = ""
+        else:
+            df["Error"] = ""
+
+        valid_indexes, invalid_devices = validate_devices(df, COMMANDS)
+
+        for index, error_message in invalid_devices:
+            metrics.unsupported += 1
+            df.at[index, "Status"] = "UNKNOWN"
+            if "Error" in df.columns:
+                df.at[index, "Error"] = error_message
+            logger.warning(f"Fila no soportada ({excel_path}): {error_message}")
+
+        logger.info(f"{len(valid_indexes)} dispositivos válidos en {excel_path}")
+
+        await process_devices(
+            df=df,
+            valid_indexes=valid_indexes,
+            sms_service=sms_service,
+            metrics=metrics,
+            max_concurrent_sms=MAX_CONCURRENT_SMS,
+            num_workers=NUM_WORKERS,
+        )
+
+        save_devices(df, excel_path)
+        total_processed += len(valid_indexes)
+        logger.info(f"Archivo actualizado: {excel_path}")
+
     end_time = time.perf_counter()
 
-    # We calculate time metrics
     total_time = end_time - start_time
-    total_processed = len(valid_indexes)
-
     throughput = total_processed / total_time if total_time > 0 else 0
     avg_time = total_time / total_processed if total_processed > 0 else 0
 
-    # Show final metrics
     summary = metrics.summary()
     print("\n")
     logger.info("----- RESUMEN FINAL -----")
@@ -226,7 +225,6 @@ async def async_main():
     logger.info(f"Workers utilizados: {NUM_WORKERS}")
     logger.info("============FIN DE EJECUCIÓN===========")
 
-    # -------------- Shut down uvicorn server --------------
     logger.info("Deteniendo servidor uvicorn...")
 
     if auto_register_webhooks and unregister_on_exit and registered_webhook_ids:
@@ -246,9 +244,7 @@ async def async_main():
                 )
             )
 
-    # Request clean exit from server
     server.should_exit = True
-    # Wait for the task to finish (optional timeout)
     try:
         await asyncio.wait_for(server_task, timeout=10.0)
     except asyncio.TimeoutError:
