@@ -32,17 +32,47 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_int(name: str, default: int, min_value: int = 0, max_value: int = 65535) -> int:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = default
+    if value < min_value:
+        return min_value
+    if value > max_value:
+        return max_value
+    return value
+
+
 def _env_events(name: str, default: str) -> list[str]:
     raw = os.getenv(name, default)
     parts = [p.strip() for p in str(raw).replace(";", ",").split(",")]
     return [p for p in parts if p]
 
 
+def _normalize_excel_path(value: str) -> str:
+    if not value:
+        return value
+    cleaned = value.strip().strip('"').strip("'")
+    cleaned = os.path.expandvars(os.path.expanduser(cleaned))
+
+    if os.name != "nt":
+        match = re.match(r"^([A-Za-z]):[\\/](.*)$", cleaned)
+        if match:
+            drive = match.group(1).lower()
+            rest = match.group(2).replace("\\", "/")
+            return f"/mnt/{drive}/{rest}"
+        cleaned = cleaned.replace("\\", "/")
+
+    return cleaned
+
+
 def _parse_excel_paths(raw_value: str) -> list[str]:
     if not raw_value:
         return []
     parts = [p.strip() for p in re.split(r"[;,]", raw_value) if p.strip()]
-    return parts
+    return [_normalize_excel_path(p) for p in parts]
 
 
 async def start_uvicorn_in_background(app_obj, host="0.0.0.0", port=80):
@@ -64,8 +94,19 @@ async def async_main():
     logger.info("==========INICIO DE EJECUCIÓN==========")
     logger.info("Iniciando procesamiento de dispositivos")
 
-    uvicorn_host = "0.0.0.0"
-    uvicorn_port = 80
+    uvicorn_host = os.getenv("SMS_GATE_SERVER_HOST", "0.0.0.0").strip() or "0.0.0.0"
+    uvicorn_port = _env_int("SMS_GATE_SERVER_PORT", 8000, min_value=1, max_value=65535)
+
+    if hasattr(os, "geteuid") and uvicorn_port < 1024:
+        try:
+            if os.geteuid() != 0:
+                logger.warning(
+                    "Puerto %s requiere privilegios en Linux. "
+                    "Si falla el bind, usa SMS_GATE_SERVER_PORT=8000.",
+                    uvicorn_port,
+                )
+        except Exception:
+            pass
 
     logger.info(f"Arrancando FastAPI (uvicorn) en {uvicorn_host}:{uvicorn_port} (background)...")
     server, server_task = await start_uvicorn_in_background(server_module.app, host=uvicorn_host, port=uvicorn_port)

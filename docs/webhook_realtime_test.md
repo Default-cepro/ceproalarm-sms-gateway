@@ -43,7 +43,16 @@ powershell -ExecutionPolicy Bypass -File .\tools\register_smsgate_webhooks.ps1 `
   -WebhookUrl "https://<TU_NGROK>/webhook/sms/events"
 ```
 
-### Opción B: curl manual (uno por evento)
+### Opción B: Script bash (WSL/Linux)
+
+```bash
+bash tools/register_smsgate_webhooks.sh \
+  --username "<USERNAME_APP>" \
+  --password "<PASSWORD_APP>" \
+  --webhook-url "https://<TU_NGROK>/webhook/sms/events"
+```
+
+### Opción C: curl manual (uno por evento)
 
 ```bash
 curl -X POST -u <username>:<password> \
@@ -62,6 +71,14 @@ powershell -ExecutionPolicy Bypass -File .\tools\send_signed_test_event.ps1 `
   -SigningKey "1dc5123a628aeefd" `
   -PhoneNumber "4243616194" `
   -Message "STATUS,0000#"
+```
+
+```bash
+bash tools/send_signed_test_event.sh \
+  --url "http://127.0.0.1:80/webhook/sms/events" \
+  --signing-key "1dc5123a628aeefd" \
+  --phone-number "4243616194" \
+  --message "STATUS,0000#"
 ```
 
 ## 5) Qué validar

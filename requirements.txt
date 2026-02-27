@@ -6,6 +6,8 @@ click==8.3.1
 colorama==0.4.6
 et_xmlfile==2.0.0
 fastapi==0.129.0
+uvicorn
+dotenv
 h11==0.16.0
 httpcore==1.0.9
 httpx==0.28.1

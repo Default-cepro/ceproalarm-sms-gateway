@@ -167,6 +167,7 @@ if (-not $SkipEnvUpdate) {
     $lines = Set-Or-AppendEnvLine -Lines $lines -Key "SMS_GATE_LOCAL_API_BASE_URL" -Value "http://127.0.0.1:$ForwardPort"
     $lines = Set-Or-AppendEnvLine -Lines $lines -Key "SMS_GATE_LOCAL_API_USERNAME" -Value $Username
     $lines = Set-Or-AppendEnvLine -Lines $lines -Key "SMS_GATE_LOCAL_API_PASSWORD" -Value $Password
+    $lines = Set-Or-AppendEnvLine -Lines $lines -Key "SMS_GATE_SERVER_PORT" -Value $ServerPort
     Set-Content -Path $envPath -Value $lines -Encoding UTF8
     Write-Host "Archivo .env actualizado para este dispositivo."
 }

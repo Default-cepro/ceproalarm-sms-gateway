@@ -16,12 +16,32 @@ Este flujo evita depender de la red local del telefono y usa tuneles ADB:
 
 ## Comando unico de configuracion
 
+### Windows (PowerShell)
+
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\tools\setup_adb_local_webhooks.ps1 `
   -AdbSerial "JBV489BM5PCAE6EM" `
   -Username "sms" `
   -Password "<LOCAL_SERVER_PASSWORD>" `
   -ServerPort 80
+```
+
+### WSL / Linux (bash)
+
+```bash
+bash tools/setup_adb_local_webhooks.sh \
+  --adb-serial "JBV489BM5PCAE6EM" \
+  --username "sms" \
+  --password "<LOCAL_SERVER_PASSWORD>" \
+  --server-port 8000
+```
+
+Si necesitas usar el `adb.exe` de Windows desde WSL:
+
+```bash
+bash tools/setup_adb_local_webhooks.sh \
+  --adb-bin "adb.exe" \
+  --password "<LOCAL_SERVER_PASSWORD>"
 ```
 
 Parametros opcionales:
@@ -57,6 +77,7 @@ Webhook registrado por el telefono:
      - `SMS_GATE_LOCAL_API_BASE_URL=http://127.0.0.1:18080`
      - `SMS_GATE_LOCAL_API_USERNAME=sms`
      - `SMS_GATE_LOCAL_API_PASSWORD=<LOCAL_PASSWORD>`
+     - `SMS_GATE_SERVER_PORT=8000` (si no usas 80)
    - `python -m src.main`
 2. Ejecuta script ADB de arriba.
 3. Envia un SMS de prueba al telefono o desde la app.
