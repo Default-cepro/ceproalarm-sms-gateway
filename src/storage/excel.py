@@ -1,6 +1,6 @@
 import re
 import unicodedata
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Mapping
 
 import pandas as pd
 from openpyxl import load_workbook
@@ -152,7 +152,7 @@ def _find_header_columns(ws) -> Optional[Dict[str, Optional[int]]]:
     return None
 
 
-def load_devices(path: str, commands_config: Optional[Dict[str, object]] = None) -> pd.DataFrame:
+def load_devices(path: str, commands_config: Optional[Mapping[str, object]] = None) -> pd.DataFrame:
     workbook = load_workbook(path)
     command_brands = list((commands_config or {}).keys())
     rows: List[Dict[str, object]] = []

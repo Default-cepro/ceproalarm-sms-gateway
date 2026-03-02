@@ -95,7 +95,7 @@ async def async_main():
     logger.info("Iniciando procesamiento de dispositivos")
 
     uvicorn_host = os.getenv("SMS_GATE_SERVER_HOST", "0.0.0.0").strip() or "0.0.0.0"
-    uvicorn_port = _env_int("SMS_GATE_SERVER_PORT", 8000, min_value=1, max_value=65535)
+    uvicorn_port = _env_int("SMS_GATE_SERVER_PORT", 8080, min_value=1, max_value=65535)
 
     if hasattr(os, "geteuid") and uvicorn_port < 1024:
         try:

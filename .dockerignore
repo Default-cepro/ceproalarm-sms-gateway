@@ -1,0 +1,14 @@
+.git
+.gitignore
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+logs/
+data/
+tests/
+*.xlsx
+*.xls
+*.csv
+*.log

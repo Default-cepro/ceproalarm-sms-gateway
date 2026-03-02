@@ -1,0 +1,17 @@
+services:
+  sms-gateway:
+    build: .
+    container_name: ceproalarm-sms-gateway
+    env_file:
+      - .env
+    environment:
+      SMS_GATE_SERVER_HOST: 0.0.0.0
+      SMS_GATE_SERVER_PORT: 8000
+      SMS_GATE_LOG_PATH: /tmp/app.log
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
