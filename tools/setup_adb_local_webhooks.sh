@@ -12,7 +12,7 @@ Options:
   --device-api-port <port>     Device local API port (default: 8080).
   --forward-port <port>        Forward port PC -> phone (default: 18080).
   --reverse-port <port>        Reverse port phone -> PC (default: 9876).
-  --server-port <port>         FastAPI server port on PC (default: 80).
+  --server-port <port>         FastAPI server port on PC (default: 8000).
   --webhook-path <path>        Webhook path on server (default: /webhook/sms/events).
   --events <csv>               Comma-separated events (default: sms:received,sms:sent,sms:delivered,sms:failed).
   --adb-bin <path>             Override adb binary (default: auto-detect adb/adb.exe).
@@ -27,7 +27,7 @@ PASSWORD=""
 DEVICE_API_PORT=8080
 FORWARD_PORT=18080
 REVERSE_PORT=9876
-SERVER_PORT=80
+SERVER_PORT=8000
 WEBHOOK_PATH="/webhook/sms/events"
 EVENTS=("sms:received" "sms:sent" "sms:delivered" "sms:failed")
 SKIP_ENV_UPDATE=0
@@ -162,6 +162,7 @@ escape_sed() {
   local s="$1"
   s="${s//\\/\\\\}"
   s="${s//&/\\&}"
+  s="${s//|/\\|}"
   echo "$s"
 }
 
@@ -172,7 +173,7 @@ upsert_env() {
   local escaped
   escaped="$(escape_sed "$value")"
   if grep -qE "^${key}=" "$env_path"; then
-    sed -i -e "s/^${key}=.*/${key}=${escaped}/" "$env_path"
+    sed -i -e "s|^${key}=.*|${key}=${escaped}|" "$env_path"
   else
     printf '%s=%s\n' "$key" "$value" >> "$env_path"
   fi

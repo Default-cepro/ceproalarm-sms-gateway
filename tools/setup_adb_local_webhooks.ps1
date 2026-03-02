@@ -6,7 +6,7 @@ param(
     [int]$DeviceApiPort = 8080,
     [int]$ForwardPort = 18080,
     [int]$ReversePort = 9876,
-    [int]$ServerPort = 80,
+    [int]$ServerPort = 8000,
     [string]$WebhookPath = "/webhook/sms/events",
     [string[]]$Events = @("sms:received", "sms:sent", "sms:delivered", "sms:failed"),
     [switch]$SkipEnvUpdate

@@ -23,7 +23,7 @@ powershell -ExecutionPolicy Bypass -File .\tools\setup_adb_local_webhooks.ps1 `
   -AdbSerial "JBV489BM5PCAE6EM" `
   -Username "sms" `
   -Password "<LOCAL_SERVER_PASSWORD>" `
-  -ServerPort 80
+  -ServerPort 8000
 ```
 
 ### WSL / Linux (bash)
@@ -57,7 +57,7 @@ Parametros opcionales:
 1. Verifica `adb` y dispositivo.
 2. Configura:
    - `adb forward tcp:18080 tcp:8080`
-   - `adb reverse tcp:9876 tcp:80` (si `-ServerPort 80`)
+   - `adb reverse tcp:9876 tcp:8000` (si `-ServerPort 8000`)
 3. Detecta endpoint de webhooks del telefono:
    - `http://127.0.0.1:18080/webhooks` o
    - `http://127.0.0.1:18080/3rdparty/v1/webhooks`
@@ -77,7 +77,7 @@ Webhook registrado por el telefono:
      - `SMS_GATE_LOCAL_API_BASE_URL=http://127.0.0.1:18080`
      - `SMS_GATE_LOCAL_API_USERNAME=sms`
      - `SMS_GATE_LOCAL_API_PASSWORD=<LOCAL_PASSWORD>`
-     - `SMS_GATE_SERVER_PORT=8000` (si no usas 80)
+     - `SMS_GATE_SERVER_PORT=8000`
    - `python -m src.main`
 2. Ejecuta script ADB de arriba.
 3. Envia un SMS de prueba al telefono o desde la app.

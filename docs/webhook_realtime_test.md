@@ -67,7 +67,7 @@ Repite para `sms:sent`, `sms:delivered`, `sms:failed`.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\tools\send_signed_test_event.ps1 `
-  -Url "http://127.0.0.1:80/webhook/sms/events" `
+  -Url "http://127.0.0.1:8000/webhook/sms/events" `
   -SigningKey "1dc5123a628aeefd" `
   -PhoneNumber "4243616194" `
   -Message "STATUS,0000#"
@@ -75,7 +75,7 @@ powershell -ExecutionPolicy Bypass -File .\tools\send_signed_test_event.ps1 `
 
 ```bash
 bash tools/send_signed_test_event.sh \
-  --url "http://127.0.0.1:80/webhook/sms/events" \
+  --url "http://127.0.0.1:8000/webhook/sms/events" \
   --signing-key "1dc5123a628aeefd" \
   --phone-number "4243616194" \
   --message "STATUS,0000#"

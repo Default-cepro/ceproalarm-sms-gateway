@@ -75,7 +75,7 @@ def _parse_excel_paths(raw_value: str) -> list[str]:
     return [_normalize_excel_path(p) for p in parts]
 
 
-async def start_uvicorn_in_background(app_obj, host="0.0.0.0", port=80):
+async def start_uvicorn_in_background(app_obj, host="0.0.0.0", port=8000):
     """
     Arranca uvicorn programáticamente en el mismo loop async como tarea.
     Devuelve la instancia Server y la tarea.
@@ -83,7 +83,15 @@ async def start_uvicorn_in_background(app_obj, host="0.0.0.0", port=80):
     config = uvicorn.Config(app=app_obj, host=host, port=port, log_level="info")
     server = uvicorn.Server(config=config)
     server_task = asyncio.create_task(server.serve())
-    await asyncio.sleep(1)
+    await asyncio.sleep(0.5)
+    if server_task.done():
+        try:
+            exc = server_task.exception()
+        except BaseException as ex:
+            raise RuntimeError(f"Uvicorn terminó durante startup en {host}:{port}: {ex}") from ex
+        if exc:
+            raise RuntimeError(f"No se pudo iniciar Uvicorn en {host}:{port}: {exc}") from exc
+        raise RuntimeError(f"Uvicorn terminó durante startup en {host}:{port} sin excepción")
     return server, server_task
 
 
@@ -95,16 +103,17 @@ async def async_main():
     logger.info("Iniciando procesamiento de dispositivos")
 
     uvicorn_host = os.getenv("SMS_GATE_SERVER_HOST", "0.0.0.0").strip() or "0.0.0.0"
-    uvicorn_port = _env_int("SMS_GATE_SERVER_PORT", 8080, min_value=1, max_value=65535)
+    uvicorn_port = _env_int("SMS_GATE_SERVER_PORT", 8000, min_value=1, max_value=65535)
 
     if hasattr(os, "geteuid") and uvicorn_port < 1024:
         try:
             if os.geteuid() != 0:
-                logger.warning(
-                    "Puerto %s requiere privilegios en Linux. "
-                    "Si falla el bind, usa SMS_GATE_SERVER_PORT=8000.",
+                logger.error(
+                    "Puerto {} requiere privilegios en Linux. "
+                    "Configura SMS_GATE_SERVER_PORT=8000 (o mayor) y vuelve a ejecutar.",
                     uvicorn_port,
                 )
+                raise SystemExit(2)
         except Exception:
             pass
 
