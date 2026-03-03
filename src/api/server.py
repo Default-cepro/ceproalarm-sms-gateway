@@ -11,6 +11,7 @@ import os
 import hmac
 import hashlib
 import httpx
+from decimal import Decimal
 from collections import deque
 from typing import Dict, Any, List, Optional, Callable, Set
 from datetime import datetime, timezone
@@ -46,6 +47,8 @@ pending_commands: Dict[str, List[Dict[str, Any]]] = {}
 message_statuses: Dict[str, Dict[str, Any]] = {}
 recent_delivery_ids_order: deque = deque()
 recent_delivery_ids_set: Set[str] = set()
+recent_incoming_message_ids_order: deque = deque()
+recent_incoming_message_ids_set: Set[str] = set()
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -129,8 +132,24 @@ def success_payload(extra: Optional[dict] = None) -> dict:
 def normalize_phone(phone: Optional[str]) -> str:
     if not phone:
         return ""
-    s = "".join(ch for ch in phone if ch.isdigit())
-    return s
+    raw = str(phone).strip()
+    if not raw:
+        return ""
+
+    # Excel often yields numbers as "4122571528.0". Drop trailing decimal zeros.
+    m = re.fullmatch(r"([0-9]+)\.0+", raw)
+    if m:
+        raw = m.group(1)
+    elif re.fullmatch(r"[+-]?[0-9]+(?:\.[0-9]+)?[eE][+-]?[0-9]+", raw):
+        # Scientific notation to integer string when possible.
+        try:
+            dec = Decimal(raw)
+            if dec == dec.to_integral_value():
+                raw = str(int(dec))
+        except Exception:
+            pass
+
+    return "".join(ch for ch in raw if ch.isdigit())
 
 
 def _phone_variants(phone: Optional[str]) -> Set[str]:
@@ -288,6 +307,22 @@ def _remember_delivery(delivery_id: Optional[str]) -> bool:
     return True
 
 
+def _remember_incoming_message(message_id: Optional[str]) -> bool:
+    if not message_id:
+        return True
+
+    if message_id in recent_incoming_message_ids_set:
+        return False
+
+    if len(recent_incoming_message_ids_order) >= SMS_GATE_MAX_TRACKED_DELIVERIES:
+        oldest = recent_incoming_message_ids_order.popleft()
+        recent_incoming_message_ids_set.discard(oldest)
+
+    recent_incoming_message_ids_order.append(message_id)
+    recent_incoming_message_ids_set.add(message_id)
+    return True
+
+
 async def _store_and_match_incoming(phone: Optional[str], message: Optional[str], parsed: Dict[str, Any]):
     await incoming_sms_queue.put({"phone": phone, "message": message, "raw": parsed})
 
@@ -431,13 +466,18 @@ async def _handle_incoming_and_try_match(parsed: Dict[str, Any]):
     phone = parsed.get("from") or parsed.get("sender") or parsed.get("phone")
     norm = normalize_phone(phone)
     message_text = parsed.get("message") or parsed.get("text") or parsed.get("body") or ""
-    logging.info("Handling inbound for matching: from=%s msg=%s", norm, message_text[:120])
     if not norm:
+        logging.debug("Inbound without normalized phone; skipping matcher.")
         return
     candidate_keys = []
     for key in list(pending_commands.keys()):
         if phones_equivalent(key, norm):
             candidate_keys.append(key)
+
+    if candidate_keys:
+        logging.info("Handling inbound for matching: from=%s msg=%s", norm, message_text[:120])
+    else:
+        logging.debug("Inbound received while idle (no pending match): from=%s", norm)
 
     for key in candidate_keys:
         entries = pending_commands.get(key, [])
@@ -509,11 +549,30 @@ async def receive_sms(request: Request):
 
         event_name = parsed.get("event")
         payload = parsed.get("payload") or {}
-        logging.info("INCOMING SMS GATE EVENT event=%s id=%s payload=%s", event_name, delivery_id, payload)
 
         if event_name in ("sms:received", "sms:data-received"):
             phone = payload.get("phoneNumber")
             message = payload.get("message")
+            incoming_message_id = payload.get("messageId")
+            has_pending_for_phone = any(phones_equivalent(key, phone) for key in list(pending_commands.keys()))
+
+            if has_pending_for_phone:
+                logging.info("INCOMING SMS GATE EVENT event=%s id=%s payload=%s", event_name, delivery_id, payload)
+            else:
+                logging.debug(
+                    "INCOMING SMS GATE EVENT (idle) event=%s id=%s phone=%s messageId=%s",
+                    event_name,
+                    delivery_id,
+                    phone,
+                    incoming_message_id,
+                )
+
+            if not _remember_incoming_message(incoming_message_id):
+                if has_pending_for_phone:
+                    logging.info("Duplicate incoming SMS ignored by messageId=%s", incoming_message_id)
+                else:
+                    logging.debug("Duplicate incoming SMS ignored by messageId=%s", incoming_message_id)
+                return JSONResponse(status_code=200, content=success_payload({"payload": {"duplicate": True}}))
             if event_name == "sms:data-received":
                 # Keep base64 content as-is; parser/matcher can choose how to handle it.
                 message = payload.get("data") or message
@@ -538,6 +597,7 @@ async def receive_sms(request: Request):
             return JSONResponse(status_code=200, content=success_payload({"payload": {"event": event_name}}))
 
         if event_name in ("sms:sent", "sms:delivered", "sms:failed"):
+            logging.info("INCOMING SMS GATE EVENT event=%s id=%s payload=%s", event_name, delivery_id, payload)
             _update_status_from_sms_gate_event(event_name, payload, parsed)
             return JSONResponse(status_code=200, content=success_payload({"payload": {"event": event_name}}))
 

@@ -1,6 +1,12 @@
 import asyncio
 import os
+import time
+import uuid
+
+import httpx
 from loguru import logger
+
+from ..api import server as server_module
 from ..api.server import send_command_and_wait, send_command_via_local_api_and_wait
 from ..core.parser import parse_response
 
@@ -11,6 +17,9 @@ class SMSService:
         self.retries = retries
         self.delay = delay
         self.timeout = timeout
+        self.local_api_base_url = os.getenv("SMS_GATE_LOCAL_API_BASE_URL", "http://127.0.0.1:18080").strip().rstrip("/")
+        self.local_api_username = os.getenv("SMS_GATE_LOCAL_API_USERNAME", "sms").strip()
+        self.local_api_password = os.getenv("SMS_GATE_LOCAL_API_PASSWORD", "")
         raw = os.getenv("SMS_GATE_LOCAL_API_ENABLED", "0").strip().lower()
         self.local_api_enabled = raw in {"1", "true", "yes", "on"}
         if self.local_api_enabled:
@@ -69,3 +78,42 @@ class SMSService:
             "error_code": "NO_RESPONSE_TIMEOUT",
             "raw_message": "",
         }
+
+    async def send_notification(self, phone: str, message: str) -> dict:
+        if not phone or not message:
+            raise ValueError("phone and message required")
+
+        message_id = str(uuid.uuid4())[:8]
+        payload = {
+            "id": message_id,
+            "to": phone,
+            "phoneNumbers": [phone],
+            "message": message,
+            "meta": {"notification": True, "timestamp": int(time.time())},
+        }
+
+        if self.local_api_enabled:
+            url = f"{self.local_api_base_url}/message"
+            auth = httpx.BasicAuth(username=self.local_api_username, password=self.local_api_password)
+            last_error = None
+            for attempt in range(1, 4):
+                try:
+                    async with httpx.AsyncClient(timeout=15.0, trust_env=False) as client:
+                        res = await client.post(url, auth=auth, json=payload)
+                    if res.status_code >= 400:
+                        raise RuntimeError(
+                            f"Local API notification failed status={res.status_code} body={res.text[:500]}"
+                        )
+                    last_error = None
+                    break
+                except Exception as ex:
+                    last_error = ex
+                    logger.warning(f"Local API notification attempt {attempt}/3 failed for {phone}: {ex}")
+                    if attempt < 3:
+                        await asyncio.sleep(0.5)
+            if last_error is not None:
+                raise last_error
+            return {"status": "SENT", "message_id": message_id}
+
+        await server_module.outgoing_messages.put(payload)
+        return {"status": "QUEUED", "message_id": message_id}

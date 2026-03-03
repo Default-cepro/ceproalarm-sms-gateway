@@ -14,6 +14,8 @@ Ejemplo minimo para correr en Docker:
 ```env
 SMS_GATE_SERVER_PORT=8000
 EXCEL_PATH=/app/data/devices.xlsx
+SMS_GATE_TIMEZONE=America/Caracas
+SMS_GATE_ACCESS_LOG=0
 ```
 
 Si ves error de permisos en logs, usa `/tmp` dentro del contenedor:
@@ -28,6 +30,22 @@ Si usas modo local ADB (SMS Gate Local server):
 SMS_GATE_LOCAL_API_ENABLED=1
 SMS_GATE_LOCAL_API_USERNAME=sms
 SMS_GATE_LOCAL_API_PASSWORD=<LOCAL_PASSWORD>
+```
+
+Scheduler 24/7 (rondas diarias por horario):
+
+```env
+SMS_GATE_SCHEDULE_ENABLED=1
+SMS_GATE_DAILY_RUN_TIMES=08:00,14:00,20:00
+SMS_GATE_SKIP_PAST_ROUNDS=1
+SMS_GATE_MAINTENANCE_FLAG_PATH=/app/data/maintenance.pause
+SMS_GATE_MAINTENANCE_RECHECK_SECONDS=60
+```
+
+Alerta de OFFLINE al cierre del día:
+
+```env
+SMS_GATE_OFFLINE_ALERT_RECIPIENTS=04143417356
 ```
 
 ## 2) Levantar el contenedor
@@ -99,3 +117,22 @@ bash tools/send_signed_test_event.sh \
   --url "http://127.0.0.1:8000/webhook/sms/events" \
   --signing-key "<SIGNING_KEY>"
 ```
+
+## 6) Mantenimiento sin apagar el server
+
+Para pausar solo las rondas (el API/webhook sigue activo), crea el archivo bandera:
+
+```bash
+touch data/maintenance.pause
+```
+
+Cuando termines mantenimiento, retíralo y el scheduler reanuda automáticamente:
+
+```bash
+rm -f data/maintenance.pause
+```
+
+Casos típicos de mantenimiento:
+- Rotación/backup de Excel (`./data`).
+- Revisión de logs y espacio en disco (`./logs`).
+- Ajuste de horarios (`SMS_GATE_DAILY_RUN_TIMES`) y reinicio controlado del contenedor.

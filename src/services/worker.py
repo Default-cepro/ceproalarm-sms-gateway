@@ -1,5 +1,6 @@
 import asyncio
 from loguru import logger
+from ..api.server import normalize_phone
 
 
 async def Worker(
@@ -16,9 +17,19 @@ async def Worker(
     while True:
         index, row = await queue.get()
 
-        phone = str(row.get("Telefono", ""))
+        phone_raw = row.get("Telefono", "")
+        phone = normalize_phone(str(phone_raw))
 
         try:
+            if not phone:
+                metrics.errors += 1
+                metrics.inoperative += 1
+                df.at[index, "Status"] = "OFFLINE"
+                if "Error" in df.columns:
+                    df.at[index, "Error"] = "INVALID_PHONE"
+                logger.error(f"Fila con teléfono inválido: {phone_raw!r}")
+                continue
+
             async with semaphore:
                 logger.debug(f"[{name}] Procesando {phone}")
 
@@ -26,7 +37,15 @@ async def Worker(
                 message = command_data["command"]
                 expected = command_data["expected"]
 
-                status = await sms_service.send_with_retry(phone, message, expected)
+                retries = max(int(getattr(sms_service, "retries", 1) or 1), 1)
+                delay = max(int(getattr(sms_service, "delay", 0) or 0), 0)
+                timeout = max(int(getattr(sms_service, "timeout", 30) or 30), 1)
+                hard_timeout_seconds = (timeout * retries) + (delay * max(retries - 1, 0)) + 5
+
+                status = await asyncio.wait_for(
+                    sms_service.send_with_retry(phone, message, expected),
+                    timeout=hard_timeout_seconds,
+                )
 
             final_status = status.get("status", "OFFLINE")
             error_code = status.get("error_code", "")
@@ -42,6 +61,16 @@ async def Worker(
                 logger.warning(f"{phone} marcado OFFLINE (error={error_code or 'N/A'})")
 
             print("\n")
+
+        except asyncio.TimeoutError:
+            metrics.errors += 1
+            metrics.inoperative += 1
+
+            df.at[index, "Status"] = "OFFLINE"
+            if "Error" in df.columns:
+                df.at[index, "Error"] = "WORKER_HARD_TIMEOUT"
+
+            logger.error(f"{phone} timeout duro en worker (pasando al siguiente)")
 
         except Exception as e:
             metrics.errors += 1
