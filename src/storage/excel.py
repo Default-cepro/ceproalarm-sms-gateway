@@ -122,6 +122,7 @@ def _find_header_columns(ws) -> Optional[Dict[str, Optional[int]]]:
             "brand_model_col": None,
             "brand_col": None,
             "model_col": None,
+            "plate_col": None,
             "error_col": None,
         }
 
@@ -138,6 +139,8 @@ def _find_header_columns(ws) -> Optional[Dict[str, Optional[int]]]:
                 mapping["brand_col"] = col_idx
             elif header == "modelo":
                 mapping["model_col"] = col_idx
+            elif header in {"placa", "placas", "plate", "plates"}:
+                mapping["plate_col"] = col_idx
             elif header == "error":
                 mapping["error_col"] = col_idx
 
@@ -187,11 +190,16 @@ def load_devices(path: str, commands_config: Optional[Mapping[str, object]] = No
             if header["error_col"] is not None:
                 current_error = str(sheet.cell(row=row_idx, column=header["error_col"]).value or "").strip()
 
+            current_plate = ""
+            if header["plate_col"] is not None:
+                current_plate = str(sheet.cell(row=row_idx, column=header["plate_col"]).value or "").strip()
+
             rows.append(
                 {
                     "Telefono": phone,
                     "Marca": brand,
                     "Modelo": model,
+                    "Placas": current_plate,
                     "Status": current_status,
                     "Error": current_error,
                     "__sheet": sheet.title,

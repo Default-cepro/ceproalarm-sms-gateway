@@ -84,6 +84,11 @@ class SMSService:
             raise ValueError("phone and message required")
 
         message_id = str(uuid.uuid4())[:8]
+        if hasattr(server_module, "register_quiet_message_id"):
+            try:
+                server_module.register_quiet_message_id(message_id)
+            except Exception:
+                pass
         payload = {
             "id": message_id,
             "to": phone,

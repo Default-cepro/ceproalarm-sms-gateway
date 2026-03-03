@@ -49,6 +49,10 @@ recent_delivery_ids_order: deque = deque()
 recent_delivery_ids_set: Set[str] = set()
 recent_incoming_message_ids_order: deque = deque()
 recent_incoming_message_ids_set: Set[str] = set()
+recent_status_event_keys_order: deque = deque()
+recent_status_event_keys_set: Set[str] = set()
+quiet_outbound_message_ids_order: deque = deque()
+quiet_outbound_message_ids_set: Set[str] = set()
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -323,6 +327,45 @@ def _remember_incoming_message(message_id: Optional[str]) -> bool:
     return True
 
 
+def _status_event_key(event_name: Optional[str], message_id: Optional[str], phone: Optional[str]) -> str:
+    return f"{event_name or ''}|{message_id or ''}|{normalize_phone(phone)}"
+
+
+def _remember_status_event(event_name: Optional[str], message_id: Optional[str], phone: Optional[str]) -> bool:
+    key = _status_event_key(event_name, message_id, phone)
+    if not key.strip("|"):
+        return True
+
+    if key in recent_status_event_keys_set:
+        return False
+
+    if len(recent_status_event_keys_order) >= SMS_GATE_MAX_TRACKED_DELIVERIES:
+        oldest = recent_status_event_keys_order.popleft()
+        recent_status_event_keys_set.discard(oldest)
+
+    recent_status_event_keys_order.append(key)
+    recent_status_event_keys_set.add(key)
+    return True
+
+
+def register_quiet_message_id(message_id: Optional[str]):
+    if not message_id:
+        return
+    if message_id in quiet_outbound_message_ids_set:
+        return
+    if len(quiet_outbound_message_ids_order) >= SMS_GATE_MAX_TRACKED_DELIVERIES:
+        oldest = quiet_outbound_message_ids_order.popleft()
+        quiet_outbound_message_ids_set.discard(oldest)
+    quiet_outbound_message_ids_order.append(message_id)
+    quiet_outbound_message_ids_set.add(message_id)
+
+
+def _is_quiet_message_id(message_id: Optional[str]) -> bool:
+    if not message_id:
+        return False
+    return message_id in quiet_outbound_message_ids_set
+
+
 async def _store_and_match_incoming(phone: Optional[str], message: Optional[str], parsed: Dict[str, Any]):
     await incoming_sms_queue.put({"phone": phone, "message": message, "raw": parsed})
 
@@ -339,7 +382,12 @@ async def _store_and_match_incoming(phone: Optional[str], message: Optional[str]
         logging.exception("Error matching incoming SMS: %s", ex)
 
 
-def _update_status_from_sms_gate_event(event_name: str, payload: Dict[str, Any], envelope: Dict[str, Any]):
+def _update_status_from_sms_gate_event(
+    event_name: str,
+    payload: Dict[str, Any],
+    envelope: Dict[str, Any],
+    quiet: bool = False,
+):
     message_id = payload.get("messageId") or envelope.get("id") or str(uuid.uuid4())
     phone = payload.get("phoneNumber")
     reason = payload.get("reason")
@@ -383,9 +431,15 @@ def _update_status_from_sms_gate_event(event_name: str, payload: Dict[str, Any],
             logging.debug("Error saving status to DB: %s", ex)
 
     if state == "failed":
-        logging.error("sms:failed for %s (message_id=%s): %s", phone, message_id, reason or "unknown")
+        if quiet:
+            logging.warning("sms:failed (quiet msg) for %s (message_id=%s): %s", phone, message_id, reason or "unknown")
+        else:
+            logging.error("sms:failed for %s (message_id=%s): %s", phone, message_id, reason or "unknown")
     else:
-        logging.info("Updated status from %s for %s (message_id=%s)", event_name, phone, message_id)
+        if quiet:
+            logging.debug("Updated status (quiet msg) from %s for %s (message_id=%s)", event_name, phone, message_id)
+        else:
+            logging.info("Updated status from %s for %s (message_id=%s)", event_name, phone, message_id)
 
 # pending/command helpers
 async def send_command_and_wait(to: str, text: str, match_fn: Optional[Callable[[str], bool]] = None, timeout: int = 30) -> Dict[str, Any]:
@@ -544,7 +598,7 @@ async def receive_sms(request: Request):
 
         delivery_id = parsed.get("id")
         if not _remember_delivery(delivery_id):
-            logging.info("Duplicate webhook delivery ignored (id=%s)", delivery_id)
+            logging.debug("Duplicate webhook delivery ignored (id=%s)", delivery_id)
             return JSONResponse(status_code=200, content=success_payload({"payload": {"duplicate": True}}))
 
         event_name = parsed.get("event")
@@ -597,8 +651,26 @@ async def receive_sms(request: Request):
             return JSONResponse(status_code=200, content=success_payload({"payload": {"event": event_name}}))
 
         if event_name in ("sms:sent", "sms:delivered", "sms:failed"):
-            logging.info("INCOMING SMS GATE EVENT event=%s id=%s payload=%s", event_name, delivery_id, payload)
-            _update_status_from_sms_gate_event(event_name, payload, parsed)
+            status_message_id = payload.get("messageId") or parsed.get("id")
+            status_phone = payload.get("phoneNumber")
+            quiet_status = _is_quiet_message_id(status_message_id)
+
+            if not _remember_status_event(event_name, status_message_id, status_phone):
+                logging.debug(
+                    "Duplicate status event ignored%s event=%s messageId=%s phone=%s",
+                    " (quiet)" if quiet_status else "",
+                    event_name,
+                    status_message_id,
+                    status_phone,
+                )
+                return JSONResponse(status_code=200, content=success_payload({"payload": {"duplicate": True}}))
+
+            if quiet_status:
+                logging.debug("INCOMING SMS GATE EVENT (quiet) event=%s id=%s payload=%s", event_name, delivery_id, payload)
+            else:
+                logging.info("INCOMING SMS GATE EVENT event=%s id=%s payload=%s", event_name, delivery_id, payload)
+
+            _update_status_from_sms_gate_event(event_name, payload, parsed, quiet=quiet_status)
             return JSONResponse(status_code=200, content=success_payload({"payload": {"event": event_name}}))
 
         if event_name in ("mms:received", "system:ping"):

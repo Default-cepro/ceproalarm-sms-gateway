@@ -293,26 +293,65 @@ async def _execute_round_for_day(
 
 
 def _build_offline_alert_messages(day_label: str, offline_devices: list[dict[str, str]], max_chars: int = 150) -> list[str]:
-    total = len(offline_devices)
-    summary = f"CEPROALARM {day_label}: {total} localizadores OFFLINE al cierre."
-    if total == 0:
-        return [summary]
+    if not offline_devices:
+        return []
 
-    numbers = [str(it.get("phone", "")).strip() or "SIN_NUMERO" for it in offline_devices]
-    details: list[str] = []
-    prefix = "OFFLINE: "
-    current = prefix
-    for number in numbers:
-        sep = "" if current == prefix else ", "
-        candidate = f"{current}{sep}{number}"
-        if len(candidate) > max_chars and current != prefix:
-            details.append(current)
-            current = f"{prefix}{number}"
-        else:
-            current = candidate
-    if current != prefix:
-        details.append(current)
-    return [summary] + details
+    def _clip(value: str, max_len: int) -> str:
+        text = str(value or "").strip()
+        if len(text) <= max_len:
+            return text
+        if max_len <= 3:
+            return text[:max_len]
+        return text[: max_len - 3] + "..."
+
+    def _one_device_message(item: dict[str, str]) -> str:
+        doc_name = Path(str(item.get("excel_path", "") or "")).name or "SIN_DOCUMENTO"
+        sheet_name = str(item.get("sheet", "")).strip() or "SIN_HOJA"
+        phone = str(item.get("phone", "")).strip() or "SIN_NUMERO"
+        brand = str(item.get("brand", "")).strip().upper() or "SIN_MARCA"
+        model = str(item.get("model", "")).strip().upper() or "SIN_MODELO"
+        plate = str(item.get("plate", "")).strip().upper() or "SIN_PLACA"
+
+        message = (
+            f"OFFLINE {day_label}\n"
+            f"Doc:{doc_name} Hoja:{sheet_name}\n"
+            f"Placa:{plate}\n"
+            f"Eq:{brand}/{model}\n"
+            f"Tel:{phone}"
+        )
+        if len(message) <= max_chars:
+            return message
+
+        doc_name = _clip(doc_name, 18) or "SIN_DOC"
+        sheet_name = _clip(sheet_name, 12) or "SIN_HOJA"
+        plate = _clip(plate, 10) or "SIN_PLACA"
+        brand = _clip(brand, 12) or "SIN_MARCA"
+        model = _clip(model, 12) or "SIN_MODELO"
+
+        compact = (
+            f"OFFLINE {day_label}\n"
+            f"{doc_name}|{sheet_name}\n"
+            f"Pl:{plate} Eq:{brand}/{model}\n"
+            f"Tel:{phone}"
+        )
+        if len(compact) <= max_chars:
+            return compact
+
+        single_line = f"OFFLINE {day_label} Tel:{phone} Pl:{plate} Eq:{brand}/{model} Doc:{doc_name}|{sheet_name}"
+        if len(single_line) <= max_chars:
+            return single_line
+        return single_line[:max_chars]
+
+    ordered = sorted(
+        offline_devices,
+        key=lambda it: (
+            str(it.get("excel_path", "")),
+            str(it.get("sheet", "")),
+            str(it.get("plate", "")),
+            str(it.get("phone", "")),
+        ),
+    )
+    return [_one_device_message(item) for item in ordered]
 
 
 async def _notify_offline_devices(
@@ -369,6 +408,8 @@ async def _finalize_day(
                         "phone": str(row.get("Telefono", "")).strip(),
                         "brand": str(row.get("Marca", "")).strip(),
                         "model": str(row.get("Modelo", "")).strip(),
+                        "plate": str(row.get("Placas", "")).strip(),
+                        "sheet": str(row.get("__sheet", "")).strip(),
                         "excel_path": state.path,
                     }
                 )
@@ -398,7 +439,12 @@ async def _finalize_day(
     deduped_offline: list[dict[str, str]] = []
     seen_keys = set()
     for item in offline_devices:
-        key = (item.get("excel_path", ""), item.get("phone", ""))
+        key = (
+            item.get("excel_path", ""),
+            item.get("sheet", ""),
+            item.get("phone", ""),
+            item.get("plate", ""),
+        )
         if key in seen_keys:
             continue
         seen_keys.add(key)
