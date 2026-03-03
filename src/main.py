@@ -180,7 +180,16 @@ async def async_main():
     local_api_mode = _env_bool("SMS_GATE_LOCAL_API_ENABLED", default=False)
     if local_api_mode:
         logger.info("SMS_GATE_LOCAL_API_ENABLED=1 -> omitiendo espera de primer llamado (/device|/message polling).")
+        logger.info(
+            "Local API base URL activa: {}",
+            os.getenv("SMS_GATE_LOCAL_API_BASE_URL", "http://127.0.0.1:18080"),
+        )
     else:
+        if Path("/.dockerenv").exists():
+            logger.warning(
+                "Contenedor en modo polling/espera. "
+                "Define SMS_GATE_LOCAL_API_ENABLED=1 para flujo ADB local."
+            )
         timeout_seconds = 300
         try:
             if hasattr(server_module, "first_request_event"):
@@ -250,9 +259,17 @@ async def async_main():
             num_workers=NUM_WORKERS,
         )
 
-        save_devices(df, excel_path)
         total_processed += len(valid_indexes)
-        logger.info(f"Archivo actualizado: {excel_path}")
+        try:
+            save_devices(df, excel_path)
+            logger.info(f"Archivo actualizado: {excel_path}")
+        except PermissionError as ex:
+            logger.error(
+                "No se pudo guardar Excel por permisos en {}: {}. "
+                "Revisa permisos del volumen/directorio data en Docker.",
+                excel_path,
+                ex,
+            )
 
     end_time = time.perf_counter()
 

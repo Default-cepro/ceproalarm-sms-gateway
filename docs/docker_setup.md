@@ -2,6 +2,11 @@
 
 Este flujo levanta el backend dentro de un contenedor. No mueve ADB al contenedor: ADB sigue corriendo en el host (WSL/Windows) y el backend consume la API local del telefono por `host.docker.internal`.
 
+`docker-compose.yml` ya fuerza:
+- `SMS_GATE_LOCAL_API_ENABLED=1`
+- `SMS_GATE_LOCAL_API_BASE_URL=http://host.docker.internal:18080`
+- ejecución con UID/GID del host (`${UID:-1000}:${GID:-1000}`) para evitar errores de permisos al escribir en `./data` y `./logs`.
+
 ## 1) Preparar `.env`
 
 Ejemplo minimo para correr en Docker:
@@ -21,7 +26,6 @@ Si usas modo local ADB (SMS Gate Local server):
 
 ```env
 SMS_GATE_LOCAL_API_ENABLED=1
-SMS_GATE_LOCAL_API_BASE_URL=http://host.docker.internal:18080
 SMS_GATE_LOCAL_API_USERNAME=sms
 SMS_GATE_LOCAL_API_PASSWORD=<LOCAL_PASSWORD>
 ```
@@ -32,6 +36,14 @@ SMS_GATE_LOCAL_API_PASSWORD=<LOCAL_PASSWORD>
 docker compose up --build
 ```
 
+Si tu usuario en WSL no es UID/GID 1000, exporta antes:
+
+```bash
+export UID="$(id -u)"
+export GID="$(id -g)"
+docker compose up --build
+```
+
 El servidor queda en `http://127.0.0.1:8000`.
 
 Si prefieres `docker run`:
@@ -39,13 +51,22 @@ Si prefieres `docker run`:
 ```bash
 docker build -t ceproalarm-sms-gateway .
 docker run --rm \
+  --name ceproalarm-sms-gateway \
+  --user "$(id -u):$(id -g)" \
   -p 8000:8000 \
   --env-file .env \
+  -e SMS_GATE_LOCAL_API_ENABLED=1 \
+  -e SMS_GATE_LOCAL_API_BASE_URL=http://host.docker.internal:18080 \
   -v "$(pwd)/logs:/app/logs" \
   -v "$(pwd)/data:/app/data" \
   --add-host=host.docker.internal:host-gateway \
   ceproalarm-sms-gateway
 ```
+
+`docker run --rm --name <name> <image>` por si solo no carga `.env`, no monta volúmenes y no agrega `host.docker.internal`, por eso suele quedarse en timeout o fallar al enviar/guardar.
+
+Si levantas el contenedor desde Docker Desktop (boton Run), agrega esas mismas variables de entorno manualmente. Si no las agregas, el servicio entra en:
+`Esperando primer llamado de la app (timeout=300s)`.
 
 ## 3) ADB local (si aplica)
 
