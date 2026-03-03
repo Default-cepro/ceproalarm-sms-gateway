@@ -1,8 +1,6 @@
 #Personales
 tests/
-data/Control de GPS Instalados en Aragua .xlsx
-data/localizadores.xlsx
-data/TST.xlsx
+data/*
 config/commands.json
 
 # Byte-compiled / optimized / DLL files

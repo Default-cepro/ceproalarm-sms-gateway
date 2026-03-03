@@ -1,5 +1,6 @@
 import asyncio
 import errno
+import glob
 import os
 import re
 import time
@@ -28,6 +29,7 @@ load_dotenv(env_var)
 NUM_WORKERS = 1
 MAX_CONCURRENT_SMS = 1
 STATUS_PRIORITY = {"OFFLINE": 0, "UNKNOWN": 1, "ONLINE": 2}
+SUPPORTED_EXCEL_EXTENSIONS = {".xlsx", ".xlsm", ".xltx", ".xltm"}
 
 
 @dataclass
@@ -99,7 +101,37 @@ def _parse_excel_paths(raw_value: str) -> list[str]:
     if not raw_value:
         return []
     parts = [p.strip() for p in re.split(r"[;,]", raw_value) if p.strip()]
-    return [_normalize_excel_path(p) for p in parts]
+
+    resolved: list[str] = []
+    seen: set[str] = set()
+
+    for part in parts:
+        normalized = _normalize_excel_path(part)
+        has_glob = any(ch in normalized for ch in ("*", "?", "["))
+        candidates: list[str] = []
+
+        if has_glob:
+            candidates = sorted(glob.glob(normalized, recursive=True))
+        else:
+            path_obj = Path(normalized)
+            if path_obj.is_dir():
+                candidates = sorted(str(p) for p in path_obj.iterdir() if p.is_file())
+            else:
+                candidates = [normalized]
+
+        for candidate in candidates:
+            normalized_candidate = _normalize_excel_path(candidate)
+            candidate_path = Path(normalized_candidate)
+            if not candidate_path.is_file():
+                continue
+            if candidate_path.suffix.lower() not in SUPPORTED_EXCEL_EXTENSIONS:
+                continue
+            if normalized_candidate in seen:
+                continue
+            seen.add(normalized_candidate)
+            resolved.append(normalized_candidate)
+
+    return resolved
 
 
 def _find_bind_oserror(exc: BaseException | None) -> OSError | None:
@@ -750,7 +782,11 @@ async def async_main():
 
     excel_paths = _parse_excel_paths(os.getenv("EXCEL_PATH", ""))
     if not excel_paths:
-        raise ValueError("EXCEL_PATH no está definido. Puedes colocar uno o varios archivos separados por ';' o ','.")
+        raise ValueError(
+            "EXCEL_PATH no está definido o no encontró archivos Excel válidos. "
+            "Puedes usar archivo, carpeta o glob (p.ej. data/lote/*.xlsx), "
+            "separados por ';' o ','."
+        )
 
     sms_service = SMSService(
         retries=_env_int("SMS_GATE_SMS_RETRIES", 1, min_value=1, max_value=10),

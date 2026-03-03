@@ -107,7 +107,12 @@ bash tools/setup_adb_local_webhooks.sh \
 
 ## 4) Archivos Excel
 
-- Usa `EXCEL_PATH=/app/data/archivo.xlsx`.
+- Puedes usar en `EXCEL_PATH`:
+  - archivo único: `/app/data/archivo.xlsx`
+  - varios archivos: `/app/data/a.xlsx,/app/data/b.xlsx`
+  - carpeta específica: `/app/data/lote_1`
+  - patrón glob: `/app/data/lote_1/*.xlsx`
+- Recomendado: guardar los Excel que sí quieres procesar en una subcarpeta dedicada (ej. `data/lote_1`) para evitar archivos sueltos.
 - Monta tus archivos en `./data` (ya está en `docker-compose.yml`).
 
 ## 5) Prueba rápida de webhook
