@@ -48,6 +48,21 @@ Alerta de OFFLINE al cierre del día:
 SMS_GATE_OFFLINE_ALERT_RECIPIENTS=04143417356
 ```
 
+Reporte por correo al cierre del día (adjunta los Excel procesados):
+
+```env
+EMAIL_REPORT_ENABLED=1
+EMAIL_REPORT_RECIPIENTS=mmorillo@ceproalarm.com.ve,aceijas@ceproalarm.com.ve
+EMAIL_REPORT_SUBJECT_PREFIX=Ceproalarm SMS Gateway
+EMAIL_SMTP_HOST=<SMTP_HOST>
+EMAIL_SMTP_PORT=587
+EMAIL_SMTP_USERNAME=<SMTP_USER>
+EMAIL_SMTP_PASSWORD=<SMTP_PASS>
+EMAIL_FROM=<REMITENTE>
+EMAIL_SMTP_USE_TLS=1
+EMAIL_SMTP_USE_SSL=0
+```
+
 ## 2) Levantar el contenedor
 
 ```bash

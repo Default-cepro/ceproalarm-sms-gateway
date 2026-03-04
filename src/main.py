@@ -19,6 +19,7 @@ from .core.logger import setup_logger
 from .core.validator import validate_devices
 from .services.metrics import Metrics
 from .services.queue_manager import process_devices
+from .services.email_service import EmailReportService
 from .services.sms_service import SMSService
 from .services.webhook_registry import register_cloud_webhooks, unregister_cloud_webhooks
 from .storage.excel import load_devices, save_devices
@@ -78,6 +79,27 @@ def _env_list(name: str, default: str = "") -> list[str]:
         return []
     parts = [p.strip() for p in str(raw).replace(";", ",").split(",")]
     return [p for p in parts if p]
+
+
+def _env_email_list(name: str, default: str = "") -> list[str]:
+    raw_values = _env_list(name, default)
+    email_pattern = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+    clean: list[str] = []
+    seen: set[str] = set()
+    for value in raw_values:
+        candidate = str(value).strip()
+        if "#" in candidate:
+            candidate = candidate.split("#", 1)[0].strip()
+        if not candidate:
+            continue
+        if not email_pattern.match(candidate):
+            continue
+        lowered = candidate.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        clean.append(candidate)
+    return clean
 
 
 def _normalize_excel_path(value: str) -> str:
@@ -414,11 +436,80 @@ async def _notify_offline_devices(
             await asyncio.sleep(0.2)
 
 
+def _collect_excel_attachments(day_states: list[DailyExcelState]) -> list[str]:
+    attachments: list[str] = []
+    seen: set[str] = set()
+    for state in day_states:
+        normalized = _normalize_excel_path(state.path)
+        if not normalized or normalized in seen:
+            continue
+        path = Path(normalized)
+        if not path.is_file():
+            continue
+        seen.add(normalized)
+        attachments.append(normalized)
+    return attachments
+
+
+async def _notify_email_report(
+    day_label: str,
+    day_states: list[DailyExcelState],
+    offline_count: int,
+    email_service: EmailReportService | None,
+    recipients: list[str],
+    subject_prefix: str,
+    logger,
+):
+    if email_service is None:
+        logger.info("Reporte por correo desactivado o sin configuración SMTP. No se enviará email.")
+        return
+    if not recipients:
+        logger.info("EMAIL_REPORT_RECIPIENTS vacío. No se enviará reporte por correo.")
+        return
+
+    attachments = _collect_excel_attachments(day_states)
+    if not attachments:
+        logger.warning("No hay archivos Excel para adjuntar en el reporte por correo.")
+        return
+
+    subject_head = subject_prefix or "Ceproalarm SMS Gateway"
+    subject = f"[{subject_head}] Reporte diario de localizadores - {day_label}"
+    body = (
+        f"Estimado equipo,\n\n"
+        f"Se adjuntan los archivos Excel procesados en la jornada {day_label}.\n\n"
+        f"Resumen:\n"
+        f"- Archivos adjuntos: {len(attachments)}\n"
+        f"- Localizadores OFFLINE al cierre: {offline_count}\n\n"
+        f"Atentamente,\n"
+        f"{subject_head}"
+    )
+
+    try:
+        result = await email_service.send_report(
+            recipients=recipients,
+            subject=subject,
+            body=body,
+            attachment_paths=attachments,
+        )
+        logger.info(
+            "Reporte por correo enviado: destinatarios={} adjuntos={} asunto='{}'".format(
+                result.get("sent_to", 0),
+                result.get("attachments", 0),
+                result.get("subject", subject),
+            )
+        )
+    except Exception as ex:
+        logger.error(f"No se pudo enviar reporte por correo: {ex}")
+
+
 async def _finalize_day(
     day_date: date,
     day_states: list[DailyExcelState],
     sms_service: SMSService,
     offline_alert_recipients: list[str],
+    email_service: EmailReportService | None,
+    email_report_recipients: list[str],
+    email_subject_prefix: str,
     logger,
 ):
     day_label = day_date.isoformat()
@@ -489,6 +580,15 @@ async def _finalize_day(
         recipients=offline_alert_recipients,
         logger=logger,
     )
+    await _notify_email_report(
+        day_label=day_label,
+        day_states=day_states,
+        offline_count=len(deduped_offline),
+        email_service=email_service,
+        recipients=email_report_recipients,
+        subject_prefix=email_subject_prefix,
+        logger=logger,
+    )
     logger.info(
         f"Cierre de jornada {day_label} completado. "
         f"Total OFFLINE finales={len(deduped_offline)}"
@@ -499,6 +599,9 @@ async def _run_single_batch(
     excel_paths: list[str],
     sms_service: SMSService,
     offline_alert_recipients: list[str],
+    email_service: EmailReportService | None,
+    email_report_recipients: list[str],
+    email_subject_prefix: str,
     runtime_tz: tzinfo,
     logger,
 ):
@@ -519,6 +622,9 @@ async def _run_single_batch(
         day_states=day_states,
         sms_service=sms_service,
         offline_alert_recipients=offline_alert_recipients,
+        email_service=email_service,
+        email_report_recipients=email_report_recipients,
+        email_subject_prefix=email_subject_prefix,
         logger=logger,
     )
 
@@ -529,6 +635,9 @@ async def _run_daily_scheduler(
     run_times: list[dt_time],
     skip_past_rounds: bool,
     offline_alert_recipients: list[str],
+    email_service: EmailReportService | None,
+    email_report_recipients: list[str],
+    email_subject_prefix: str,
     runtime_tz: tzinfo,
     maintenance_flag_path: Path | None,
     maintenance_recheck_seconds: int,
@@ -578,6 +687,9 @@ async def _run_daily_scheduler(
                     day_states=day_states,
                     sms_service=sms_service,
                     offline_alert_recipients=offline_alert_recipients,
+                    email_service=email_service,
+                    email_report_recipients=email_report_recipients,
+                    email_subject_prefix=email_subject_prefix,
                     logger=logger,
                 )
                 day_finalized = True
@@ -798,6 +910,46 @@ async def async_main():
     run_times = _parse_daily_run_times(os.getenv("SMS_GATE_DAILY_RUN_TIMES", "08:00,14:00,20:00"))
     skip_past_rounds = _env_bool("SMS_GATE_SKIP_PAST_ROUNDS", default=True)
     offline_alert_recipients = _env_list("SMS_GATE_OFFLINE_ALERT_RECIPIENTS", "04143417356")
+    email_report_enabled = _env_bool("EMAIL_REPORT_ENABLED", default=False)
+    email_report_recipients = _env_email_list("EMAIL_REPORT_RECIPIENTS", "")
+    email_subject_prefix = (
+        os.getenv("EMAIL_REPORT_SUBJECT_PREFIX", "Ceproalarm SMS Gateway").strip()
+        or "Ceproalarm SMS Gateway"
+    )
+    email_service: EmailReportService | None = None
+    if email_report_enabled:
+        smtp_host = os.getenv("EMAIL_SMTP_HOST", "").strip()
+        smtp_port = _env_int("EMAIL_SMTP_PORT", 587, min_value=1, max_value=65535)
+        smtp_username = os.getenv("EMAIL_SMTP_USERNAME", "").strip()
+        smtp_password = os.getenv("EMAIL_SMTP_PASSWORD", "")
+        smtp_from = os.getenv("EMAIL_FROM", "").strip() or smtp_username
+        smtp_use_ssl = _env_bool("EMAIL_SMTP_USE_SSL", default=False)
+        smtp_use_tls = _env_bool("EMAIL_SMTP_USE_TLS", default=not smtp_use_ssl)
+        if smtp_use_ssl:
+            smtp_use_tls = False
+        smtp_timeout_seconds = _env_int("EMAIL_SMTP_TIMEOUT_SECONDS", 20, min_value=3, max_value=300)
+
+        missing_email_vars = []
+        if not smtp_host:
+            missing_email_vars.append("EMAIL_SMTP_HOST")
+        if not smtp_from:
+            missing_email_vars.append("EMAIL_FROM (o EMAIL_SMTP_USERNAME)")
+
+        if missing_email_vars:
+            logger.warning(
+                "Reporte por correo activo pero faltan variables: " + ", ".join(missing_email_vars)
+            )
+        else:
+            email_service = EmailReportService(
+                smtp_host=smtp_host,
+                smtp_port=smtp_port,
+                smtp_username=smtp_username,
+                smtp_password=smtp_password,
+                from_address=smtp_from,
+                use_tls=smtp_use_tls,
+                use_ssl=smtp_use_ssl,
+                timeout_seconds=smtp_timeout_seconds,
+            )
     runtime_tz = _resolve_runtime_timezone(logger)
     maintenance_flag_raw = os.getenv("SMS_GATE_MAINTENANCE_FLAG_PATH", "data/maintenance.pause").strip()
     maintenance_flag_path = Path(_normalize_excel_path(maintenance_flag_raw)) if maintenance_flag_raw else None
@@ -816,6 +968,9 @@ async def async_main():
     if maintenance_flag_path:
         logger.info(f"Mantenimiento por bandera de archivo: {maintenance_flag_path}")
     logger.info(f"Destinatarios alerta OFFLINE: {offline_alert_recipients or ['(sin configurar)']}")
+    logger.info(f"Reporte por correo={'ON' if email_report_enabled else 'OFF'}")
+    if email_report_enabled:
+        logger.info(f"Destinatarios correo: {email_report_recipients or ['(sin configurar)']}")
 
     try:
         if schedule_enabled:
@@ -825,6 +980,9 @@ async def async_main():
                 run_times=run_times,
                 skip_past_rounds=skip_past_rounds,
                 offline_alert_recipients=offline_alert_recipients,
+                email_service=email_service,
+                email_report_recipients=email_report_recipients,
+                email_subject_prefix=email_subject_prefix,
                 runtime_tz=runtime_tz,
                 maintenance_flag_path=maintenance_flag_path,
                 maintenance_recheck_seconds=maintenance_recheck_seconds,
@@ -835,6 +993,9 @@ async def async_main():
                 excel_paths=excel_paths,
                 sms_service=sms_service,
                 offline_alert_recipients=offline_alert_recipients,
+                email_service=email_service,
+                email_report_recipients=email_report_recipients,
+                email_subject_prefix=email_subject_prefix,
                 runtime_tz=runtime_tz,
                 logger=logger,
             )
