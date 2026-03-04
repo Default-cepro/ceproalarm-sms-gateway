@@ -1,6 +1,7 @@
 #Personales
 tests/
 data/*
+!data/.gitkeep
 config/commands.json
 
 # Byte-compiled / optimized / DLL files
