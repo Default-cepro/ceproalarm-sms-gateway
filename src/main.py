@@ -20,6 +20,7 @@ from .core.validator import validate_devices
 from .services.metrics import Metrics
 from .services.queue_manager import process_devices
 from .services.email_service import EmailReportService
+from .services.persistence import RunPersistence
 from .services.sms_service import SMSService
 from .services.webhook_registry import register_cloud_webhooks, unregister_cloud_webhooks
 from .storage.excel import load_devices, save_devices
@@ -221,6 +222,16 @@ def _merge_status(current_status: str, round_status: str) -> str:
     return current
 
 
+def _apply_result_to_metrics(metrics: Metrics, status: str, error_code: str) -> None:
+    normalized = _normalize_status(status)
+    if normalized in ("ONLINE", "UNKNOWN"):
+        metrics.success += 1
+    else:
+        metrics.inoperative += 1
+    if error_code in {"WORKER_HARD_TIMEOUT", "UNHANDLED_EXCEPTION"}:
+        metrics.errors += 1
+
+
 def _resolve_runtime_timezone(logger) -> tzinfo:
     tz_name = os.getenv("SMS_GATE_TIMEZONE", "").strip()
     if tz_name:
@@ -246,7 +257,11 @@ async def _sleep_until(target_dt: datetime):
         await asyncio.sleep(min(remaining, 30))
 
 
-def _prepare_daily_excel_states(excel_paths: list[str], logger) -> list[DailyExcelState]:
+def _prepare_daily_excel_states(
+    excel_paths: list[str],
+    logger,
+    persistence: RunPersistence | None = None,
+) -> list[DailyExcelState]:
     states: list[DailyExcelState] = []
     for excel_path in excel_paths:
         logger.info(f"Cargando archivo Excel para jornada: {excel_path}")
@@ -269,6 +284,18 @@ def _prepare_daily_excel_states(excel_paths: list[str], logger) -> list[DailyExc
         normalized_invalid = [(idx, str(error_message)) for idx, error_message in invalid_devices]
 
         aggregate: dict[Any, DeviceAggregate] = {idx: DeviceAggregate() for idx in valid_indexes}
+        if persistence is not None:
+            persisted = persistence.get_aggregate(excel_path)
+            if persisted:
+                for idx in valid_indexes:
+                    key = str(idx)
+                    if key in persisted:
+                        item = persisted[key]
+                        aggregate[idx] = DeviceAggregate(
+                            status=str(item.get("status") or "OFFLINE"),
+                            error=str(item.get("error") or ""),
+                            rounds_observed=int(item.get("rounds_observed") or 0),
+                        )
         for idx, error_message in normalized_invalid:
             aggregate[idx] = DeviceAggregate(status="UNKNOWN", error=error_message, rounds_observed=0)
 
@@ -294,56 +321,112 @@ async def _execute_round_for_day(
     round_number: int,
     total_rounds: int,
     logger,
+    persistence: RunPersistence | None = None,
 ):
     logger.info(f"========== RONDA {round_number}/{total_rounds} ==========")
-    for state in day_states:
-        round_df = state.base_df.copy(deep=True)
-        round_df["Status"] = ""
-        if "Error" not in round_df.columns:
-            round_df["Error"] = ""
-        else:
-            round_df["Error"] = ""
+    round_index = max(round_number - 1, 0)
+    if persistence is not None:
+        persistence.mark_round_started(round_index)
 
-        round_metrics = Metrics()
+    round_completed = False
+    try:
+        for state in day_states:
+            round_df = state.base_df.copy(deep=True)
+            round_df["Status"] = ""
+            if "Error" not in round_df.columns:
+                round_df["Error"] = ""
+            else:
+                round_df["Error"] = ""
 
-        for idx, error_message in state.invalid_devices:
-            round_metrics.unsupported += 1
-            round_df.at[idx, "Status"] = "UNKNOWN"
-            round_df.at[idx, "Error"] = error_message
-            logger.warning(f"Fila no soportada ({state.path}): {error_message}")
+            round_metrics = Metrics()
+            round_results = {}
+            if persistence is not None:
+                round_results = persistence.get_round_results(round_index, state.path)
 
-        if state.valid_indexes:
-            await process_devices(
-                df=round_df,
-                valid_indexes=state.valid_indexes,
-                sms_service=sms_service,
-                metrics=round_metrics,
-                max_concurrent_sms=MAX_CONCURRENT_SMS,
-                num_workers=NUM_WORKERS,
+            invalid_index_map = {str(idx): idx for idx, _ in state.invalid_devices}
+            valid_index_map = {str(idx): idx for idx in state.valid_indexes}
+            if round_results:
+                skipped_valid = sum(1 for key in round_results if key in valid_index_map)
+                skipped_invalid = sum(1 for key in round_results if key in invalid_index_map)
+                if skipped_valid or skipped_invalid:
+                    logger.info(
+                        f"Reanudando {state.path}: "
+                        f"saltados {skipped_valid + skipped_invalid} dispositivos ya procesados "
+                        f"(validos={skipped_valid} no_soportados={skipped_invalid})"
+                    )
+
+            if round_results:
+                for idx_key, payload in round_results.items():
+                    idx = valid_index_map.get(idx_key) or invalid_index_map.get(idx_key)
+                    if idx is None:
+                        continue
+                    status_value = str(payload.get("status") or "").strip().upper()
+                    error_value = str(payload.get("error") or "").strip()
+                    round_df.at[idx, "Status"] = status_value
+                    if "Error" in round_df.columns:
+                        round_df.at[idx, "Error"] = error_value
+                    if idx_key in invalid_index_map:
+                        round_metrics.unsupported += 1
+                    else:
+                        _apply_result_to_metrics(round_metrics, status_value, error_value)
+
+            for idx, error_message in state.invalid_devices:
+                idx_key = str(idx)
+                if idx_key in round_results:
+                    continue
+                round_metrics.unsupported += 1
+                round_df.at[idx, "Status"] = "UNKNOWN"
+                round_df.at[idx, "Error"] = error_message
+                logger.warning(f"Fila no soportada ({state.path}): {error_message}")
+                if persistence is not None:
+                    persistence.record_round_result(round_index, state.path, idx, "UNKNOWN", error_message)
+
+            valid_pending = [idx for idx in state.valid_indexes if str(idx) not in round_results]
+            if valid_pending:
+                def _record_result(row_index, status, error_code, _outcome):
+                    if persistence is None:
+                        return
+                    persistence.record_round_result(round_index, state.path, row_index, status, error_code)
+
+                await process_devices(
+                    df=round_df,
+                    valid_indexes=valid_pending,
+                    sms_service=sms_service,
+                    metrics=round_metrics,
+                    max_concurrent_sms=MAX_CONCURRENT_SMS,
+                    num_workers=NUM_WORKERS,
+                    result_callback=_record_result,
+                )
+
+            counts = {"ONLINE": 0, "UNKNOWN": 0, "OFFLINE": 0}
+            for idx in state.valid_indexes:
+                round_status = _normalize_status(round_df.at[idx, "Status"])
+                round_error = str(round_df.at[idx, "Error"] or "").strip()
+
+                aggregate = state.aggregate.setdefault(idx, DeviceAggregate())
+                aggregate.rounds_observed += 1
+                aggregate.status = _merge_status(aggregate.status, round_status)
+
+                if aggregate.status in ("ONLINE", "UNKNOWN"):
+                    aggregate.error = ""
+                elif round_status == "OFFLINE":
+                    aggregate.error = round_error or aggregate.error or "NO_RESPONSE_TIMEOUT"
+
+                counts[round_status] += 1
+
+            summary = round_metrics.summary()
+            logger.info(
+                f"Ronda {round_number} ({state.path}) -> "
+                f"ONLINE={counts['ONLINE']} UNKNOWN={counts['UNKNOWN']} OFFLINE={counts['OFFLINE']} "
+                f"errores={summary['errors']} no_soportados={summary['unsupported']}"
             )
 
-        counts = {"ONLINE": 0, "UNKNOWN": 0, "OFFLINE": 0}
-        for idx in state.valid_indexes:
-            round_status = _normalize_status(round_df.at[idx, "Status"])
-            round_error = str(round_df.at[idx, "Error"] or "").strip()
-
-            aggregate = state.aggregate.setdefault(idx, DeviceAggregate())
-            aggregate.rounds_observed += 1
-            aggregate.status = _merge_status(aggregate.status, round_status)
-
-            if aggregate.status in ("ONLINE", "UNKNOWN"):
-                aggregate.error = ""
-            elif round_status == "OFFLINE":
-                aggregate.error = round_error or aggregate.error or "NO_RESPONSE_TIMEOUT"
-
-            counts[round_status] += 1
-
-        summary = round_metrics.summary()
-        logger.info(
-            f"Ronda {round_number} ({state.path}) -> "
-            f"ONLINE={counts['ONLINE']} UNKNOWN={counts['UNKNOWN']} OFFLINE={counts['OFFLINE']} "
-            f"errores={summary['errors']} no_soportados={summary['unsupported']}"
-        )
+            if persistence is not None:
+                persistence.save_aggregate(state.path, state.aggregate)
+        round_completed = True
+    finally:
+        if round_completed and persistence is not None:
+            persistence.mark_round_completed(round_index)
 
 
 def _build_offline_alert_messages(day_label: str, offline_devices: list[dict[str, str]], max_chars: int = 150) -> list[str]:
@@ -511,6 +594,7 @@ async def _finalize_day(
     email_report_recipients: list[str],
     email_subject_prefix: str,
     logger,
+    persistence: RunPersistence | None = None,
 ):
     day_label = day_date.isoformat()
     logger.info(f"========== CIERRE DE JORNADA {day_label} ==========")
@@ -593,6 +677,8 @@ async def _finalize_day(
         f"Cierre de jornada {day_label} completado. "
         f"Total OFFLINE finales={len(deduped_offline)}"
     )
+    if persistence is not None:
+        persistence.clear()
 
 
 async def _run_single_batch(
@@ -604,9 +690,10 @@ async def _run_single_batch(
     email_subject_prefix: str,
     runtime_tz: tzinfo,
     logger,
+    persistence: RunPersistence | None = None,
 ):
     logger.info("SMS_GATE_SCHEDULE_ENABLED=0 -> ejecución única")
-    day_states = _prepare_daily_excel_states(excel_paths, logger)
+    day_states = _prepare_daily_excel_states(excel_paths, logger, persistence=persistence)
     if not day_states:
         logger.warning("No hay Excel válidos para procesar en ejecución única.")
         return
@@ -616,6 +703,7 @@ async def _run_single_batch(
         round_number=1,
         total_rounds=1,
         logger=logger,
+        persistence=persistence,
     )
     await _finalize_day(
         day_date=datetime.now(runtime_tz).date(),
@@ -626,6 +714,7 @@ async def _run_single_batch(
         email_report_recipients=email_report_recipients,
         email_subject_prefix=email_subject_prefix,
         logger=logger,
+        persistence=persistence,
     )
 
 
@@ -634,6 +723,7 @@ async def _run_daily_scheduler(
     sms_service: SMSService,
     run_times: list[dt_time],
     skip_past_rounds: bool,
+    skip_grace_seconds: int,
     offline_alert_recipients: list[str],
     email_service: EmailReportService | None,
     email_report_recipients: list[str],
@@ -642,33 +732,61 @@ async def _run_daily_scheduler(
     maintenance_flag_path: Path | None,
     maintenance_recheck_seconds: int,
     logger,
+    persistence: RunPersistence | None = None,
 ):
     current_day: date | None = None
     day_states: list[DailyExcelState] = []
     next_round_index = 0
     day_finalized = False
     ran_any_round = False
+    resume_round_index: int | None = None
+    resume_pending = False
 
     while True:
         now = datetime.now(runtime_tz)
         if current_day != now.date():
             current_day = now.date()
-            day_states = _prepare_daily_excel_states(excel_paths, logger)
+            if persistence is not None:
+                run_time_strings = [t.strftime("%H:%M:%S") for t in run_times]
+                persistence.ensure_day(current_day.isoformat(), run_time_strings, excel_paths)
+                resume_round_index = persistence.get_in_progress_round_index()
+            else:
+                resume_round_index = None
+            resume_pending = resume_round_index is not None
+
+            day_states = _prepare_daily_excel_states(excel_paths, logger, persistence=persistence)
             next_round_index = 0
             day_finalized = False
             ran_any_round = False
 
-            if skip_past_rounds:
-                next_round_index = sum(
-                    1
-                    for run_time in run_times
-                    if datetime.combine(current_day, run_time, tzinfo=runtime_tz) < now
+            if resume_round_index is not None:
+                next_round_index = resume_round_index
+                logger.warning(
+                    f"Reanudando ronda {resume_round_index + 1}/{len(run_times)} "
+                    f"pendiente por apagado anterior."
                 )
-                if next_round_index > 0:
-                    logger.warning(
-                        f"Se omiten {next_round_index} ronda(s) ya vencidas de hoy "
-                        f"(SMS_GATE_SKIP_PAST_ROUNDS=1)."
+            else:
+                persisted_next = None
+                if persistence is not None:
+                    persisted_next = persistence.first_incomplete_round_index()
+                if persisted_next is not None:
+                    next_round_index = persisted_next
+
+                if skip_past_rounds:
+                    skipped = sum(
+                        1
+                        for run_time in run_times
+                        if datetime.combine(current_day, run_time, tzinfo=runtime_tz)
+                        + timedelta(seconds=skip_grace_seconds)
+                        < now
                     )
+                    if skipped > next_round_index:
+                        next_round_index = skipped
+                    if skipped > 0:
+                        logger.warning(
+                            f"Se omiten {skipped} ronda(s) ya vencidas de hoy "
+                            f"(SMS_GATE_SKIP_PAST_ROUNDS=1)."
+                        )
 
             logger.info(
                 f"Nueva jornada {current_day.isoformat()} -> "
@@ -691,6 +809,7 @@ async def _run_daily_scheduler(
                     email_report_recipients=email_report_recipients,
                     email_subject_prefix=email_subject_prefix,
                     logger=logger,
+                    persistence=persistence,
                 )
                 day_finalized = True
 
@@ -702,13 +821,14 @@ async def _run_daily_scheduler(
 
         target_dt = datetime.combine(active_day, run_times[next_round_index], tzinfo=runtime_tz)
         now = datetime.now(runtime_tz)
-        if now < target_dt:
-            logger.info(
-                f"Próxima ronda {next_round_index + 1}/{len(run_times)} programada para "
-                f"{target_dt.strftime('%Y-%m-%d %H:%M:%S')}"
-            )
-            await _sleep_until(target_dt)
-            continue
+        if not (resume_pending and resume_round_index == next_round_index):
+            if now < target_dt:
+                logger.info(
+                    f"Próxima ronda {next_round_index + 1}/{len(run_times)} programada para "
+                    f"{target_dt.strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+                await _sleep_until(target_dt)
+                continue
 
         if maintenance_flag_path and maintenance_flag_path.exists():
             logger.warning(
@@ -729,8 +849,11 @@ async def _run_daily_scheduler(
                 round_number=next_round_index + 1,
                 total_rounds=len(run_times),
                 logger=logger,
+                persistence=persistence,
             )
             ran_any_round = True
+            if resume_pending and resume_round_index == next_round_index:
+                resume_pending = False
 
         next_round_index += 1
 
@@ -909,6 +1032,7 @@ async def async_main():
     schedule_enabled = _env_bool("SMS_GATE_SCHEDULE_ENABLED", default=True)
     run_times = _parse_daily_run_times(os.getenv("SMS_GATE_DAILY_RUN_TIMES", "08:00,14:00,20:00"))
     skip_past_rounds = _env_bool("SMS_GATE_SKIP_PAST_ROUNDS", default=True)
+    skip_grace_seconds = _env_int("SMS_GATE_SKIP_GRACE_SECONDS", 60, min_value=0, max_value=3600)
     offline_alert_recipients = _env_list("SMS_GATE_OFFLINE_ALERT_RECIPIENTS", "04143417356")
     email_report_enabled = _env_bool("EMAIL_REPORT_ENABLED", default=False)
     email_report_recipients = _env_email_list("EMAIL_REPORT_RECIPIENTS", "")
@@ -959,18 +1083,31 @@ async def async_main():
         min_value=5,
         max_value=3600,
     )
+    persistence_enabled = _env_bool("SMS_GATE_PERSISTENCE_ENABLED", default=True)
+    persistence_path_raw = os.getenv("SMS_GATE_PERSISTENCE_PATH", "data/run_state.json").strip()
+    persistence_path = (
+        Path(_normalize_excel_path(persistence_path_raw)) if persistence_path_raw else None
+    )
+    persistence: RunPersistence | None = None
+    if persistence_enabled and persistence_path is not None:
+        persistence = RunPersistence(persistence_path, logger)
 
     logger.info(
         f"Modo scheduler={'ON' if schedule_enabled else 'OFF'} | "
         f"horas={', '.join(t.strftime('%H:%M:%S') for t in run_times)} | "
         f"skip_pasadas={'1' if skip_past_rounds else '0'}"
     )
+    if skip_past_rounds:
+        logger.info(f"Ventana de gracia skip_pasadas: {skip_grace_seconds}s")
     if maintenance_flag_path:
         logger.info(f"Mantenimiento por bandera de archivo: {maintenance_flag_path}")
     logger.info(f"Destinatarios alerta OFFLINE: {offline_alert_recipients or ['(sin configurar)']}")
     logger.info(f"Reporte por correo={'ON' if email_report_enabled else 'OFF'}")
     if email_report_enabled:
         logger.info(f"Destinatarios correo: {email_report_recipients or ['(sin configurar)']}")
+    logger.info(f"Persistencia={'ON' if persistence is not None else 'OFF'}")
+    if persistence is not None:
+        logger.info(f"Archivo persistencia: {persistence_path}")
 
     try:
         if schedule_enabled:
@@ -979,6 +1116,7 @@ async def async_main():
                 sms_service=sms_service,
                 run_times=run_times,
                 skip_past_rounds=skip_past_rounds,
+                skip_grace_seconds=skip_grace_seconds,
                 offline_alert_recipients=offline_alert_recipients,
                 email_service=email_service,
                 email_report_recipients=email_report_recipients,
@@ -987,6 +1125,7 @@ async def async_main():
                 maintenance_flag_path=maintenance_flag_path,
                 maintenance_recheck_seconds=maintenance_recheck_seconds,
                 logger=logger,
+                persistence=persistence,
             )
         else:
             await _run_single_batch(
@@ -998,6 +1137,7 @@ async def async_main():
                 email_subject_prefix=email_subject_prefix,
                 runtime_tz=runtime_tz,
                 logger=logger,
+                persistence=persistence,
             )
     finally:
         logger.info("Deteniendo servidor uvicorn...")

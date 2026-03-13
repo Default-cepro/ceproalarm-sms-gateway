@@ -10,15 +10,31 @@ async def Worker(
     metrics,
     semaphore,
     sms_service,
+    progress_callback=None,
+    result_callback=None,
 ):
     logger.info(f"Worker {name} iniciado")
-    print("\n")
-
     while True:
         index, row = await queue.get()
 
         phone_raw = row.get("Telefono", "")
         phone = normalize_phone(str(phone_raw))
+
+        def _emit_progress():
+            if progress_callback is None:
+                return
+            try:
+                progress_callback()
+            except Exception:
+                pass
+
+        def _emit_result(status: str, error_code: str, outcome: str):
+            if result_callback is None:
+                return
+            try:
+                result_callback(index, status, error_code, outcome)
+            except Exception:
+                pass
 
         try:
             if not phone:
@@ -28,6 +44,8 @@ async def Worker(
                 if "Error" in df.columns:
                     df.at[index, "Error"] = "INVALID_PHONE"
                 logger.error(f"Fila con teléfono inválido: {phone_raw!r}")
+                _emit_result("OFFLINE", "INVALID_PHONE", "error")
+                _emit_progress()
                 continue
 
             async with semaphore:
@@ -56,11 +74,12 @@ async def Worker(
             if final_status in ("ONLINE", "UNKNOWN"):
                 metrics.success += 1
                 logger.success(f"{phone} {final_status}")
+                _emit_result(final_status, error_code, "success")
             else:
                 metrics.inoperative += 1
                 logger.warning(f"{phone} marcado OFFLINE (error={error_code or 'N/A'})")
-
-            print("\n")
+                _emit_result("OFFLINE", error_code or "", "offline")
+            _emit_progress()
 
         except asyncio.TimeoutError:
             metrics.errors += 1
@@ -71,6 +90,8 @@ async def Worker(
                 df.at[index, "Error"] = "WORKER_HARD_TIMEOUT"
 
             logger.error(f"{phone} timeout duro en worker (pasando al siguiente)")
+            _emit_result("OFFLINE", "WORKER_HARD_TIMEOUT", "error")
+            _emit_progress()
 
         except Exception as e:
             metrics.errors += 1
@@ -81,6 +102,8 @@ async def Worker(
                 df.at[index, "Error"] = "UNHANDLED_EXCEPTION"
 
             logger.error(f"{phone} error final: {e}")
+            _emit_result("OFFLINE", "UNHANDLED_EXCEPTION", "error")
+            _emit_progress()
 
         finally:
             queue.task_done()

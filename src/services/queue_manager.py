@@ -11,6 +11,8 @@ async def process_devices(
     metrics,
     max_concurrent_sms: int = 1,
     num_workers: int = 3,
+    progress_callback=None,
+    result_callback=None,
 ):
     queue = asyncio.Queue()
 
@@ -50,6 +52,8 @@ async def process_devices(
                 metrics=metrics,
                 semaphore=semaphore,
                 sms_service=sms_service,
+                progress_callback=progress_callback,
+                result_callback=result_callback,
             )
         )
         for i in range(num_workers)

@@ -2,7 +2,7 @@ services:
   sms-gateway:
     build: .
     container_name: ceproalarm-sms-gateway
-    restart: unless-stopped
+    restart: no
     user: "${UID:-1000}:${GID:-1000}"
     env_file:
       - .env
