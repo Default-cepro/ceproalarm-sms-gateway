@@ -156,6 +156,32 @@ def normalize_phone(phone: Optional[str]) -> str:
     return "".join(ch for ch in raw if ch.isdigit())
 
 
+def format_phone_for_local_api(phone: Optional[str]) -> str:
+    raw = str(phone or "").strip()
+    digits = normalize_phone(raw)
+    if not digits:
+        return ""
+
+    if raw.startswith("+"):
+        return f"+{digits}"
+
+    country_code = os.getenv("SMS_GATE_LOCAL_API_COUNTRY_CODE", "58").strip()
+    country_code = "".join(ch for ch in country_code if ch.isdigit())
+    if not country_code:
+        return digits
+
+    if digits.startswith("00") and len(digits) > 2:
+        return f"+{digits[2:]}"
+    if digits.startswith(country_code) and len(digits) > len(country_code):
+        return f"+{digits}"
+    if digits.startswith("0"):
+        return f"+{country_code}{digits.lstrip('0')}"
+    if len(digits) == 10:
+        return f"+{country_code}{digits}"
+
+    return digits
+
+
 def _phone_variants(phone: Optional[str]) -> Set[str]:
     """
     Genera variantes comparables para tolerar diferencias comunes:
@@ -488,7 +514,7 @@ async def send_command_via_local_api_and_wait(
         body = {
             "id": cmd_id,
             "message": text,
-            "phoneNumbers": [to],
+            "phoneNumbers": [format_phone_for_local_api(to)],
         }
         url = f"{runtime_cfg['base_url']}/message"
         auth = httpx.BasicAuth(username=runtime_cfg["username"], password=runtime_cfg["password"])
