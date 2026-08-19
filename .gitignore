@@ -1,5 +1,4 @@
 #Personales
-tests/
 data/*
 !data/.gitkeep
 config/commands.json
