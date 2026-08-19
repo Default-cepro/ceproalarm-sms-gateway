@@ -1,8 +1,6 @@
 import asyncio
 import errno
-import glob
 import os
-import re
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, time as dt_time, timedelta, tzinfo
@@ -11,10 +9,10 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import uvicorn
-from dotenv import load_dotenv
 
 from .api import server as server_module
 from .core.commands import COMMANDS
+from .core.config import normalize_excel_path, settings
 from .core.logger import setup_logger
 from .core.validator import validate_devices
 from .services.metrics import Metrics
@@ -25,13 +23,9 @@ from .services.sms_service import SMSService
 from .services.webhook_registry import register_cloud_webhooks, unregister_cloud_webhooks
 from .storage.excel import load_devices, save_devices
 
-env_var = Path(__file__).resolve().parents[1] / ".env"
-load_dotenv(env_var)
-
 NUM_WORKERS = 1
 MAX_CONCURRENT_SMS = 1
 STATUS_PRIORITY = {"OFFLINE": 0, "UNKNOWN": 1, "ONLINE": 2}
-SUPPORTED_EXCEL_EXTENSIONS = {".xlsx", ".xlsm", ".xltx", ".xltm"}
 
 
 @dataclass
@@ -48,113 +42,6 @@ class DailyExcelState:
     valid_indexes: list[Any]
     invalid_devices: list[tuple[Any, str]]
     aggregate: dict[Any, DeviceAggregate] = field(default_factory=dict)
-
-
-def _env_bool(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name, "1" if default else "0")
-    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _env_int(name: str, default: int, min_value: int = 0, max_value: int = 65535) -> int:
-    raw = os.getenv(name, str(default)).strip()
-    try:
-        value = int(raw)
-    except Exception:
-        value = default
-    if value < min_value:
-        return min_value
-    if value > max_value:
-        return max_value
-    return value
-
-
-def _env_events(name: str, default: str) -> list[str]:
-    raw = os.getenv(name, default)
-    parts = [p.strip() for p in str(raw).replace(";", ",").split(",")]
-    return [p for p in parts if p]
-
-
-def _env_list(name: str, default: str = "") -> list[str]:
-    raw = os.getenv(name, default)
-    if raw is None:
-        return []
-    parts = [p.strip() for p in str(raw).replace(";", ",").split(",")]
-    return [p for p in parts if p]
-
-
-def _env_email_list(name: str, default: str = "") -> list[str]:
-    raw_values = _env_list(name, default)
-    email_pattern = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-    clean: list[str] = []
-    seen: set[str] = set()
-    for value in raw_values:
-        candidate = str(value).strip()
-        if "#" in candidate:
-            candidate = candidate.split("#", 1)[0].strip()
-        if not candidate:
-            continue
-        if not email_pattern.match(candidate):
-            continue
-        lowered = candidate.lower()
-        if lowered in seen:
-            continue
-        seen.add(lowered)
-        clean.append(candidate)
-    return clean
-
-
-def _normalize_excel_path(value: str) -> str:
-    if not value:
-        return value
-    cleaned = value.strip().strip('"').strip("'")
-    cleaned = os.path.expandvars(os.path.expanduser(cleaned))
-
-    if os.name != "nt":
-        match = re.match(r"^([A-Za-z]):[\\/](.*)$", cleaned)
-        if match:
-            drive = match.group(1).lower()
-            rest = match.group(2).replace("\\", "/")
-            return f"/mnt/{drive}/{rest}"
-        cleaned = cleaned.replace("\\", "/")
-
-    return cleaned
-
-
-def _parse_excel_paths(raw_value: str) -> list[str]:
-    if not raw_value:
-        return []
-    parts = [p.strip() for p in re.split(r"[;,]", raw_value) if p.strip()]
-
-    resolved: list[str] = []
-    seen: set[str] = set()
-
-    for part in parts:
-        normalized = _normalize_excel_path(part)
-        has_glob = any(ch in normalized for ch in ("*", "?", "["))
-        candidates: list[str] = []
-
-        if has_glob:
-            candidates = sorted(glob.glob(normalized, recursive=True))
-        else:
-            path_obj = Path(normalized)
-            if path_obj.is_dir():
-                candidates = sorted(str(p) for p in path_obj.iterdir() if p.is_file())
-            else:
-                candidates = [normalized]
-
-        for candidate in candidates:
-            normalized_candidate = _normalize_excel_path(candidate)
-            candidate_path = Path(normalized_candidate)
-            if not candidate_path.is_file():
-                continue
-            if candidate_path.suffix.lower() not in SUPPORTED_EXCEL_EXTENSIONS:
-                continue
-            if normalized_candidate in seen:
-                continue
-            seen.add(normalized_candidate)
-            resolved.append(normalized_candidate)
-
-    return resolved
 
 
 def _find_bind_oserror(exc: BaseException | None) -> OSError | None:
@@ -179,32 +66,6 @@ def _format_startup_error(host: str, port: int, exc: BaseException | None) -> st
     if exc is not None:
         return f"No se pudo iniciar Uvicorn en {host}:{port}: {exc}"
     return f"Uvicorn terminó durante startup en {host}:{port} sin excepción"
-
-
-def _parse_daily_run_times(raw_value: str) -> list[dt_time]:
-    fallback = "08:00,14:00,20:00"
-    raw = (raw_value or fallback).strip()
-    tokens = [p.strip() for p in raw.replace(";", ",").split(",") if p.strip()]
-    if not tokens:
-        tokens = [p.strip() for p in fallback.split(",") if p.strip()]
-
-    parsed_times: list[dt_time] = []
-    for token in tokens:
-        parsed = None
-        for fmt in ("%H:%M:%S", "%H:%M"):
-            try:
-                parsed = datetime.strptime(token, fmt).time().replace(microsecond=0)
-                break
-            except ValueError:
-                continue
-        if parsed is None:
-            raise ValueError(f"Hora inválida en SMS_GATE_DAILY_RUN_TIMES: '{token}'. Usa HH:MM o HH:MM:SS")
-        parsed_times.append(parsed)
-
-    unique_times = sorted(set(parsed_times))
-    if not unique_times:
-        raise ValueError("SMS_GATE_DAILY_RUN_TIMES no tiene horarios válidos.")
-    return unique_times
 
 
 def _normalize_status(value: Any) -> str:
@@ -233,7 +94,7 @@ def _apply_result_to_metrics(metrics: Metrics, status: str, error_code: str) -> 
 
 
 def _resolve_runtime_timezone(logger) -> tzinfo:
-    tz_name = os.getenv("SMS_GATE_TIMEZONE", "").strip()
+    tz_name = settings.timezone
     if tz_name:
         try:
             tz = ZoneInfo(tz_name)
@@ -523,7 +384,7 @@ def _collect_excel_attachments(day_states: list[DailyExcelState]) -> list[str]:
     attachments: list[str] = []
     seen: set[str] = set()
     for state in day_states:
-        normalized = _normalize_excel_path(state.path)
+        normalized = normalize_excel_path(state.path)
         if not normalized or normalized in seen:
             continue
         path = Path(normalized)
@@ -897,8 +758,8 @@ async def async_main():
     logger = setup_logger()
     logger.info("========== INICIO DEL SERVICIO ==========")
 
-    uvicorn_host = os.getenv("SMS_GATE_SERVER_HOST", "0.0.0.0").strip() or "0.0.0.0"
-    uvicorn_port = _env_int("SMS_GATE_SERVER_PORT", 8000, min_value=1, max_value=65535)
+    uvicorn_host = settings.server_host
+    uvicorn_port = settings.server_port
 
     if hasattr(os, "geteuid") and uvicorn_port < 1024:
         try:
@@ -912,7 +773,7 @@ async def async_main():
         except Exception:
             pass
 
-    uvicorn_access_log = _env_bool("SMS_GATE_ACCESS_LOG", default=False)
+    uvicorn_access_log = settings.access_log
     logger.info(
         f"Arrancando FastAPI (uvicorn) en {uvicorn_host}:{uvicorn_port} "
         f"(background, access_log={'ON' if uvicorn_access_log else 'OFF'})..."
@@ -928,17 +789,14 @@ async def async_main():
         logger.error(str(ex))
         raise SystemExit(2)
 
-    auto_register_webhooks = _env_bool("SMS_GATE_AUTO_REGISTER_WEBHOOKS", default=False)
-    unregister_on_exit = _env_bool("SMS_GATE_UNREGISTER_ON_EXIT", default=False)
-    cloud_api_url = os.getenv("SMS_GATE_API_URL", "https://api.sms-gate.app/3rdparty/v1").strip()
-    cloud_api_username = os.getenv("SMS_GATE_API_USERNAME", "").strip()
-    cloud_api_password = os.getenv("SMS_GATE_API_PASSWORD", "")
-    webhook_url = os.getenv("SMS_GATE_WEBHOOK_URL", "").strip()
-    webhook_events = _env_events(
-        "SMS_GATE_WEBHOOK_EVENTS",
-        "sms:received,sms:sent,sms:delivered,sms:failed",
-    )
-    device_id = os.getenv("SMS_GATE_DEVICE_ID", "").strip() or None
+    auto_register_webhooks = settings.auto_register_webhooks
+    unregister_on_exit = settings.unregister_on_exit
+    cloud_api_url = settings.api_url
+    cloud_api_username = settings.api_username
+    cloud_api_password = settings.api_password
+    webhook_url = settings.webhook_url
+    webhook_events = settings.webhook_events
+    device_id = settings.device_id
     registered_webhook_ids: list[str] = []
 
     if auto_register_webhooks:
@@ -985,12 +843,12 @@ async def async_main():
                     "(no usar login de /webhook/sms/device)."
                 )
 
-    local_api_mode = _env_bool("SMS_GATE_LOCAL_API_ENABLED", default=False)
+    local_api_mode = settings.local_api_enabled
     if local_api_mode:
         logger.info("SMS_GATE_LOCAL_API_ENABLED=1 -> omitiendo espera de primer llamado (/device|/message polling).")
         logger.info(
             "Local API base URL activa: {}",
-            os.getenv("SMS_GATE_LOCAL_API_BASE_URL", "http://127.0.0.1:18080"),
+            settings.local_api_base_url,
         )
     else:
         if Path("/.dockerenv").exists():
@@ -1015,7 +873,7 @@ async def async_main():
         except Exception as ex:
             logger.exception(f"Error esperando primer llamado de la app: {ex}")
 
-    excel_paths = _parse_excel_paths(os.getenv("EXCEL_PATH", ""))
+    excel_paths = settings.excel_paths
     if not excel_paths:
         raise ValueError(
             "EXCEL_PATH no está definido o no encontró archivos Excel válidos. "
@@ -1024,34 +882,29 @@ async def async_main():
         )
 
     sms_service = SMSService(
-        retries=_env_int("SMS_GATE_SMS_RETRIES", 1, min_value=1, max_value=10),
-        delay=_env_int("SMS_GATE_SMS_RETRY_DELAY_SECONDS", 30, min_value=0, max_value=3600),
-        timeout=_env_int("SMS_GATE_SMS_TIMEOUT_SECONDS", 30, min_value=1, max_value=3600),
+        retries=settings.sms_retries,
+        delay=settings.sms_retry_delay_seconds,
+        timeout=settings.sms_timeout_seconds,
     )
 
-    schedule_enabled = _env_bool("SMS_GATE_SCHEDULE_ENABLED", default=True)
-    run_times = _parse_daily_run_times(os.getenv("SMS_GATE_DAILY_RUN_TIMES", "08:00,14:00,20:00"))
-    skip_past_rounds = _env_bool("SMS_GATE_SKIP_PAST_ROUNDS", default=True)
-    skip_grace_seconds = _env_int("SMS_GATE_SKIP_GRACE_SECONDS", 60, min_value=0, max_value=3600)
-    offline_alert_recipients = _env_list("SMS_GATE_OFFLINE_ALERT_RECIPIENTS", "04143417356")
-    email_report_enabled = _env_bool("EMAIL_REPORT_ENABLED", default=False)
-    email_report_recipients = _env_email_list("EMAIL_REPORT_RECIPIENTS", "")
-    email_subject_prefix = (
-        os.getenv("EMAIL_REPORT_SUBJECT_PREFIX", "Ceproalarm SMS Gateway").strip()
-        or "Ceproalarm SMS Gateway"
-    )
+    schedule_enabled = settings.schedule_enabled
+    run_times = settings.daily_run_times
+    skip_past_rounds = settings.skip_past_rounds
+    skip_grace_seconds = settings.skip_grace_seconds
+    offline_alert_recipients = settings.offline_alert_recipients
+    email_report_enabled = settings.email_report_enabled
+    email_report_recipients = settings.email_report_recipients
+    email_subject_prefix = settings.email_report_subject_prefix
     email_service: EmailReportService | None = None
     if email_report_enabled:
-        smtp_host = os.getenv("EMAIL_SMTP_HOST", "").strip()
-        smtp_port = _env_int("EMAIL_SMTP_PORT", 587, min_value=1, max_value=65535)
-        smtp_username = os.getenv("EMAIL_SMTP_USERNAME", "").strip()
-        smtp_password = os.getenv("EMAIL_SMTP_PASSWORD", "")
-        smtp_from = os.getenv("EMAIL_FROM", "").strip() or smtp_username
-        smtp_use_ssl = _env_bool("EMAIL_SMTP_USE_SSL", default=False)
-        smtp_use_tls = _env_bool("EMAIL_SMTP_USE_TLS", default=not smtp_use_ssl)
-        if smtp_use_ssl:
-            smtp_use_tls = False
-        smtp_timeout_seconds = _env_int("EMAIL_SMTP_TIMEOUT_SECONDS", 20, min_value=3, max_value=300)
+        smtp_host = settings.email_smtp_host
+        smtp_port = settings.email_smtp_port
+        smtp_username = settings.email_smtp_username
+        smtp_password = settings.email_smtp_password
+        smtp_from = settings.email_from
+        smtp_use_ssl = settings.email_smtp_use_ssl
+        smtp_use_tls = settings.email_smtp_use_tls
+        smtp_timeout_seconds = settings.email_smtp_timeout_seconds
 
         missing_email_vars = []
         if not smtp_host:
@@ -1075,19 +928,10 @@ async def async_main():
                 timeout_seconds=smtp_timeout_seconds,
             )
     runtime_tz = _resolve_runtime_timezone(logger)
-    maintenance_flag_raw = os.getenv("SMS_GATE_MAINTENANCE_FLAG_PATH", "data/maintenance.pause").strip()
-    maintenance_flag_path = Path(_normalize_excel_path(maintenance_flag_raw)) if maintenance_flag_raw else None
-    maintenance_recheck_seconds = _env_int(
-        "SMS_GATE_MAINTENANCE_RECHECK_SECONDS",
-        60,
-        min_value=5,
-        max_value=3600,
-    )
-    persistence_enabled = _env_bool("SMS_GATE_PERSISTENCE_ENABLED", default=True)
-    persistence_path_raw = os.getenv("SMS_GATE_PERSISTENCE_PATH", "data/run_state.json").strip()
-    persistence_path = (
-        Path(_normalize_excel_path(persistence_path_raw)) if persistence_path_raw else None
-    )
+    maintenance_flag_path = Path(settings.maintenance_flag_path) if settings.maintenance_flag_path else None
+    maintenance_recheck_seconds = settings.maintenance_recheck_seconds
+    persistence_enabled = settings.persistence_enabled
+    persistence_path = Path(settings.persistence_path) if settings.persistence_path else None
     persistence: RunPersistence | None = None
     if persistence_enabled and persistence_path is not None:
         persistence = RunPersistence(persistence_path, logger)

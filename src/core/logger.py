@@ -3,13 +3,15 @@ from pathlib import Path
 import os
 import sys
 
+from .config import settings
+
 
 def _default_logs_path() -> Path:
     return Path(__file__).resolve().parents[2] / "logs" / "app.log"
 
 
 def _resolve_logs_path() -> Path | None:
-    raw = os.getenv("SMS_GATE_LOG_PATH", "").strip()
+    raw = settings.log_path
     if not raw:
         return _default_logs_path()
     lowered = raw.lower()
