@@ -11,7 +11,19 @@ SMS_GATE_TIMESTAMP_TOLERANCE_SECONDS=300
 SMS_GATE_MAX_TRACKED_DELIVERIES=5000
 ```
 
-Si quieres auto registro en startup de `src.main`:
+### Modo local / ADB (sin firma)
+
+En el flujo local (app SMS Gateway en modo Local server con `adb reverse`), los eventos entrantes llegan **sin firma**. Deja la verificación desactivada:
+
+```env
+SMS_GATE_REQUIRE_SIGNATURE=0
+```
+
+Con `SMS_GATE_REQUIRE_SIGNATURE=0` el servidor acepta webhooks sin cabeceras `X-Signature`/`X-Timestamp`. Si la activas (`=1`), exige la firma HMAC-SHA256 de `raw_body + x-timestamp` en la cabecera `x-signature`, con tolerancia de `SMS_GATE_TIMESTAMP_TOLERANCE_SECONDS`.
+
+### Auto registro en Cloud (opcional)
+
+Si quieres auto registro en startup de `src.main` (vía `src/services/webhook_registry.py`):
 
 ```env
 SMS_GATE_AUTO_REGISTER_WEBHOOKS=1
@@ -24,26 +36,17 @@ SMS_GATE_DEVICE_ID=
 SMS_GATE_UNREGISTER_ON_EXIT=0
 ```
 
-`/webhook/sms/device` (`login`, `deviceName`) no son credenciales de Cloud API.
+> Las credenciales de Cloud API son las del **Home tab** de la app, no las del flujo local API.
 
 ## 2) Arrancar el servidor
 
-```powershell
+```bash
 python -m src.main
 ```
 
 ## 3) Registrar webhooks (Cloud mode)
 
-### Opción A: Script PowerShell
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\tools\register_smsgate_webhooks.ps1 `
-  -Username "<USERNAME_APP>" `
-  -Password "<PASSWORD_APP>" `
-  -WebhookUrl "https://<TU_NGROK>/webhook/sms/events"
-```
-
-### Opción B: Script bash (WSL/Linux)
+### Opción A: Script bash
 
 ```bash
 bash tools/register_smsgate_webhooks.sh \
@@ -52,7 +55,7 @@ bash tools/register_smsgate_webhooks.sh \
   --webhook-url "https://<TU_NGROK>/webhook/sms/events"
 ```
 
-### Opción C: curl manual (uno por evento)
+### Opción B: curl manual (uno por evento)
 
 ```bash
 curl -X POST -u <username>:<password> \
@@ -65,14 +68,6 @@ Repite para `sms:sent`, `sms:delivered`, `sms:failed`.
 
 ## 4) Probar firma y recepción sin esperar al tracker
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\tools\send_signed_test_event.ps1 `
-  -Url "http://127.0.0.1:8000/webhook/sms/events" `
-  -SigningKey "1dc5123a628aeefd" `
-  -PhoneNumber "4243616194" `
-  -Message "STATUS,0000#"
-```
-
 ```bash
 bash tools/send_signed_test_event.sh \
   --url "http://127.0.0.1:8000/webhook/sms/events" \
@@ -80,6 +75,14 @@ bash tools/send_signed_test_event.sh \
   --phone-number "4243616194" \
   --message "STATUS,0000#"
 ```
+
+> En modo local/ADB (`SMS_GATE_REQUIRE_SIGNATURE=0`) puedes probar con un `curl` sin firmar:
+>
+> ```bash
+> curl -X POST http://127.0.0.1:8000/webhook/sms/events \
+>   -H "Content-Type: application/json" \
+>   -d '{"event":"sms:received","payload":{"phoneNumber":"4243616194","message":"STATUS,0000#"}}'
+> ```
 
 ## 5) Qué validar
 
