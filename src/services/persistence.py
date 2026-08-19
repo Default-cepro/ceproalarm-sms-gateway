@@ -7,7 +7,7 @@ from typing import Any
 class RunPersistence:
     def __init__(self, path: Path, logger):
         self.path = Path(path)
-        self.logger = logger
+        self.logger = logger.bind(component="persistence")
         self.state: dict[str, Any] | None = None
 
     def _load(self) -> dict[str, Any] | None:

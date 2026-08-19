@@ -1,14 +1,16 @@
 import asyncio
-import logging
 import time
 import uuid
 from collections import deque
 from typing import Any, Callable, Dict, List, Optional, Set
 
 import httpx
+from loguru import logger
 
 from ..core.config import settings
 from ..core.phones import format_phone_for_local_api, normalize_phone, phones_equivalent
+
+logger = logger.bind(component="state")
 
 incoming_sms_queue: asyncio.Queue = asyncio.Queue()
 pending_commands: Dict[str, List[Dict[str, Any]]] = {}
@@ -121,7 +123,7 @@ async def send_command_via_local_api_and_wait(
     key = normalize_phone(to)
     entry = {"id": cmd_id, "future": fut, "match_fn": match_fn, "created_at": int(time.time()), "to": key}
     pending_commands.setdefault(key, []).append(entry)
-    logging.info("Registered pending local-api command %s for %s", cmd_id, key)
+    logger.info("Registered pending local-api command {} for {}", cmd_id, key)
 
     try:
         body = {
@@ -142,7 +144,7 @@ async def send_command_via_local_api_and_wait(
                 break
             except Exception as ex:
                 send_error = ex
-                logging.warning("Local API send attempt %s failed for %s: %s", send_attempt, to, ex)
+                logger.warning("Local API send attempt {} failed for {}: {}", send_attempt, to, ex)
                 if send_attempt < 3:
                     await asyncio.sleep(0.5)
         if send_error is not None:
@@ -161,7 +163,7 @@ async def _handle_incoming_and_try_match(parsed: Dict[str, Any]):
     norm = normalize_phone(phone)
     message_text = parsed.get("message") or parsed.get("text") or parsed.get("body") or ""
     if not norm:
-        logging.debug("Inbound without normalized phone; skipping matcher.")
+        logger.debug("Inbound without normalized phone; skipping matcher.")
         return
     candidate_keys = []
     for key in list(pending_commands.keys()):
@@ -169,9 +171,9 @@ async def _handle_incoming_and_try_match(parsed: Dict[str, Any]):
             candidate_keys.append(key)
 
     if candidate_keys:
-        logging.info("Handling inbound for matching: from=%s msg=%s", norm, message_text[:120])
+        logger.info("Handling inbound for matching: from={} msg={}", norm, message_text[:120])
     else:
-        logging.debug("Inbound received while idle (no pending match): from=%s", norm)
+        logger.debug("Inbound received while idle (no pending match): from={}", norm)
 
     for key in candidate_keys:
         entries = pending_commands.get(key, [])
@@ -183,13 +185,13 @@ async def _handle_incoming_and_try_match(parsed: Dict[str, Any]):
                     try:
                         matched = bool(match_fn(message_text))
                     except Exception as ex:
-                        logging.warning("match_fn error: %s", ex)
+                        logger.warning("match_fn error: {}", ex)
                         matched = False
                 else:
                     matched = True
                 if matched and not e["future"].done():
                     e["future"].set_result({"from": phone, "message": message_text, "raw": parsed})
-                    logging.info("Resolved pending command %s for inbound=%s pending_key=%s", e["id"], norm, key)
+                    logger.info("Resolved pending command {} for inbound={} pending_key={}", e["id"], norm, key)
                     return
             except Exception as ex:
-                logging.exception("Error while matching pending command: %s", ex)
+                logger.exception("Error while matching pending command: {}", ex)

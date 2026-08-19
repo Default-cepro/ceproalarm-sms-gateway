@@ -65,6 +65,7 @@ def _prepare_daily_excel_states(
     logger,
     persistence: RunPersistence | None = None,
 ) -> list[DailyExcelState]:
+    logger = logger.bind(component="day")
     states: list[DailyExcelState] = []
     for excel_path in excel_paths:
         logger.info(f"Cargando archivo Excel para jornada: {excel_path}")
@@ -126,6 +127,7 @@ async def _execute_round_for_day(
     logger,
     persistence: RunPersistence | None = None,
 ):
+    logger = logger.bind(component="day")
     logger.info(f"========== RONDA {round_number}/{total_rounds} ==========")
     round_index = max(round_number - 1, 0)
     if persistence is not None:
@@ -301,6 +303,7 @@ async def _notify_offline_devices(
     recipients: list[str],
     logger,
 ):
+    logger = logger.bind(component="day")
     if not recipients:
         logger.info("SMS_GATE_OFFLINE_ALERT_RECIPIENTS vacío. No se enviarán alertas OFFLINE.")
         return
@@ -346,6 +349,7 @@ async def _notify_email_report(
     subject_prefix: str,
     logger,
 ):
+    logger = logger.bind(component="day")
     if email_service is None:
         logger.info("Reporte por correo desactivado o sin configuración SMTP. No se enviará email.")
         return
@@ -399,6 +403,7 @@ async def _finalize_day(
     logger,
     persistence: RunPersistence | None = None,
 ):
+    logger = logger.bind(component="day")
     day_label = day_date.isoformat()
     logger.info(f"========== CIERRE DE JORNADA {day_label} ==========")
 
@@ -495,6 +500,7 @@ async def _run_single_batch(
     logger,
     persistence: RunPersistence | None = None,
 ):
+    logger = logger.bind(component="day")
     logger.info("SMS_GATE_SCHEDULE_ENABLED=0 -> ejecución única")
     day_states = _prepare_daily_excel_states(excel_paths, logger, persistence=persistence)
     if not day_states:

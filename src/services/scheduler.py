@@ -47,6 +47,7 @@ async def _run_daily_scheduler(
     logger,
     persistence: RunPersistence | None = None,
 ):
+    logger = logger.bind(component="scheduler")
     current_day: date | None = None
     day_states: list[DailyExcelState] = []
     next_round_index = 0
