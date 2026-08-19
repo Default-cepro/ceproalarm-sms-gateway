@@ -5,10 +5,10 @@ import uuid
 import httpx
 from loguru import logger
 
-from ..api import server as server_module
-from ..api.server import format_phone_for_local_api, send_command_and_wait, send_command_via_local_api_and_wait
+from ..api.state import register_quiet_message_id, send_command_via_local_api_and_wait
 from ..core.config import settings
 from ..core.parser import parse_response
+from ..core.phones import format_phone_for_local_api
 
 
 class SMSService:
@@ -31,20 +31,12 @@ class SMSService:
             try:
                 logger.debug(f"Enviando intento {attempt + 1}/{self.retries} a {phone}")
 
-                if self.local_api_enabled:
-                    response = await send_command_via_local_api_and_wait(
-                        to=phone,
-                        text=message,
-                        match_fn=None,  # Resolver con cualquier respuesta, luego evaluamos expected.
-                        timeout=self.timeout
-                    )
-                else:
-                    response = await send_command_and_wait(
-                        to=phone,
-                        text=message,
-                        match_fn=None,  # Resolver con cualquier respuesta, luego evaluamos expected.
-                        timeout=self.timeout
-                    )
+                response = await send_command_via_local_api_and_wait(
+                    to=phone,
+                    text=message,
+                    match_fn=None,  # Resolver con cualquier respuesta, luego evaluamos expected.
+                    timeout=self.timeout
+                )
 
                 raw_message = response.get("message", "")
                 expected_ok = parse_response(raw_message, expected)
@@ -83,11 +75,10 @@ class SMSService:
             raise ValueError("phone and message required")
 
         message_id = str(uuid.uuid4())[:8]
-        if hasattr(server_module, "register_quiet_message_id"):
-            try:
-                server_module.register_quiet_message_id(message_id)
-            except Exception:
-                pass
+        try:
+            register_quiet_message_id(message_id)
+        except Exception:
+            pass
         api_phone = format_phone_for_local_api(phone)
         payload = {
             "id": message_id,
@@ -120,5 +111,4 @@ class SMSService:
                 raise last_error
             return {"status": "SENT", "message_id": message_id}
 
-        await server_module.outgoing_messages.put(payload)
-        return {"status": "QUEUED", "message_id": message_id}
+        raise RuntimeError("SMS_GATE_LOCAL_API_ENABLED is false; polling send path was removed")
