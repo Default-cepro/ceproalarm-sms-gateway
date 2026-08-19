@@ -10,6 +10,8 @@ from ..core.config import settings
 from ..core.parser import parse_response
 from ..core.phones import format_phone_for_local_api
 
+logger = logger.bind(component="sms")
+
 
 class SMSService:
 

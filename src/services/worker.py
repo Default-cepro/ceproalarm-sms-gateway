@@ -2,6 +2,8 @@ import asyncio
 from loguru import logger
 from ..core.phones import normalize_phone
 
+logger = logger.bind(component="worker")
+
 
 async def Worker(
     name: str,

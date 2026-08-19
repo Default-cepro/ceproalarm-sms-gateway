@@ -22,12 +22,14 @@ def _resolve_logs_path() -> Path | None:
 
 def setup_logger():
     logger.remove()
+    logger.configure(extra={"component": "app"})
 
     logger.add(
         sys.stdout,
         level="INFO",
         format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
-               "<level>{level}</level> | "
+               "<level>{level:<8}</level> | "
+               "<cyan>{extra[component]:<12}</cyan> | "
                "{message}"
     )
 
@@ -39,7 +41,7 @@ def setup_logger():
                 log_path,
                 rotation="1 MB",
                 level="DEBUG",
-                format="{time} | {level} | {message}"
+                format="{time} | {level:<8} | {extra[component]:<12} | {message}"
             )
         except Exception as exc:
             logger.warning(

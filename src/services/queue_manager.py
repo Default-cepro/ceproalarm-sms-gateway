@@ -3,6 +3,8 @@ from loguru import logger
 from .worker import Worker
 from ..core.commands import get_command
 
+logger = logger.bind(component="queue")
+
 
 async def process_devices(
     df,

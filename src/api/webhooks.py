@@ -1,7 +1,6 @@
 import hashlib
 import hmac
 import json
-import logging
 import time
 import uuid
 from typing import Any, Dict, Optional
@@ -9,6 +8,7 @@ from urllib.parse import parse_qs
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from loguru import logger
 
 from ..core.config import settings
 from ..core.phones import phones_equivalent
@@ -23,7 +23,7 @@ from .state import (
     pending_commands,
 )
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logger.bind(component="webhooks")
 
 
 def parse_body_bytes(raw: bytes, content_type: str) -> Any:
@@ -114,7 +114,7 @@ async def _store_and_match_incoming(phone: Optional[str], message: Optional[str]
     try:
         await _handle_incoming_and_try_match(parsed)
     except Exception as ex:
-        logging.exception("Error matching incoming SMS: %s", ex)
+        logger.exception("Error matching incoming SMS: {}", ex)
 
 
 def _update_status_from_sms_gate_event(
@@ -160,14 +160,14 @@ def _update_status_from_sms_gate_event(
 
     if state == "failed":
         if quiet:
-            logging.warning("sms:failed (quiet msg) for %s (message_id=%s): %s", phone, message_id, reason or "unknown")
+            logger.warning("sms:failed (quiet msg) for {} (message_id={}): {}", phone, message_id, reason or "unknown")
         else:
-            logging.error("sms:failed for %s (message_id=%s): %s", phone, message_id, reason or "unknown")
+            logger.error("sms:failed for {} (message_id={}): {}", phone, message_id, reason or "unknown")
     else:
         if quiet:
-            logging.debug("Updated status (quiet msg) from %s for %s (message_id=%s)", event_name, phone, message_id)
+            logger.debug("Updated status (quiet msg) from {} for {} (message_id={})", event_name, phone, message_id)
         else:
-            logging.info("Updated status from %s for %s (message_id=%s)", event_name, phone, message_id)
+            logger.info("Updated status from {} for {} (message_id={})", event_name, phone, message_id)
 
 
 async def root():
@@ -187,19 +187,19 @@ async def receive_sms(request: Request):
     ct = request.headers.get("content-type", "")
     parsed = parse_body_bytes(raw, ct)
     if not isinstance(parsed, dict):
-        logging.warning("INCOMING /webhook/sms invalid body: %s", raw)
+        logger.warning("INCOMING /webhook/sms invalid body: {}", raw)
         return JSONResponse(status_code=400, content={"payload": {"success": False, "error": "invalid body"}})
 
     # SMS Gateway app webhook envelope: {"event":"sms:received","payload":{...}, ...}
     if _is_sms_gate_event(parsed):
         signature_error = _verify_sms_gate_signature(raw, request)
         if signature_error:
-            logging.warning("Rejected webhook by signature validation: %s", signature_error)
+            logger.warning("Rejected webhook by signature validation: {}", signature_error)
             return JSONResponse(status_code=401, content={"payload": {"success": False, "error": signature_error}})
 
         delivery_id = parsed.get("id")
         if not _remember_delivery(delivery_id):
-            logging.debug("Duplicate webhook delivery ignored (id=%s)", delivery_id)
+            logger.debug("Duplicate webhook delivery ignored (id={})", delivery_id)
             return JSONResponse(status_code=200, content=success_payload({"payload": {"duplicate": True}}))
 
         event_name = parsed.get("event")
@@ -212,10 +212,10 @@ async def receive_sms(request: Request):
             has_pending_for_phone = any(phones_equivalent(key, phone) for key in list(pending_commands.keys()))
 
             if has_pending_for_phone:
-                logging.info("INCOMING SMS GATE EVENT event=%s id=%s payload=%s", event_name, delivery_id, payload)
+                logger.info("INCOMING SMS GATE EVENT event={} id={} payload={}", event_name, delivery_id, payload)
             else:
-                logging.debug(
-                    "INCOMING SMS GATE EVENT (idle) event=%s id=%s phone=%s messageId=%s",
+                logger.debug(
+                    "INCOMING SMS GATE EVENT (idle) event={} id={} phone={} messageId={}",
                     event_name,
                     delivery_id,
                     phone,
@@ -224,9 +224,9 @@ async def receive_sms(request: Request):
 
             if not _remember_incoming_message(incoming_message_id):
                 if has_pending_for_phone:
-                    logging.info("Duplicate incoming SMS ignored by messageId=%s", incoming_message_id)
+                    logger.info("Duplicate incoming SMS ignored by messageId={}", incoming_message_id)
                 else:
-                    logging.debug("Duplicate incoming SMS ignored by messageId=%s", incoming_message_id)
+                    logger.debug("Duplicate incoming SMS ignored by messageId={}", incoming_message_id)
                 return JSONResponse(status_code=200, content=success_payload({"payload": {"duplicate": True}}))
             if event_name == "sms:data-received":
                 # Keep base64 content as-is; parser/matcher can choose how to handle it.
@@ -257,8 +257,8 @@ async def receive_sms(request: Request):
             quiet_status = _is_quiet_message_id(status_message_id)
 
             if not _remember_status_event(event_name, status_message_id, status_phone):
-                logging.debug(
-                    "Duplicate status event ignored%s event=%s messageId=%s phone=%s",
+                logger.debug(
+                    "Duplicate status event ignored{} event={} messageId={} phone={}",
                     " (quiet)" if quiet_status else "",
                     event_name,
                     status_message_id,
@@ -266,23 +266,18 @@ async def receive_sms(request: Request):
                 )
                 return JSONResponse(status_code=200, content=success_payload({"payload": {"duplicate": True}}))
 
-            if quiet_status:
-                logging.debug("INCOMING SMS GATE EVENT (quiet) event=%s id=%s payload=%s", event_name, delivery_id, payload)
-            else:
-                logging.info("INCOMING SMS GATE EVENT event=%s id=%s payload=%s", event_name, delivery_id, payload)
-
             _update_status_from_sms_gate_event(event_name, payload, parsed, quiet=quiet_status)
             return JSONResponse(status_code=200, content=success_payload({"payload": {"event": event_name}}))
 
         if event_name in ("mms:received", "system:ping"):
-            logging.info("Received event %s (ack only)", event_name)
+            logger.info("Received event {} (ack only)", event_name)
             return JSONResponse(status_code=200, content=success_payload({"payload": {"event": event_name}}))
 
-        logging.warning("Unknown webhook event ignored: %s", event_name)
+        logger.warning("Unknown webhook event ignored: {}", event_name)
         return JSONResponse(status_code=200, content=success_payload({"payload": {"event": event_name, "ignored": True}}))
 
     # Legacy format compatibility
-    logging.info("INCOMING /webhook/sms BODY (legacy): %s", parsed)
+    logger.info("INCOMING /webhook/sms BODY (legacy): {}", parsed)
     phone = parsed.get("from") or parsed.get("sender") or parsed.get("phone")
     message = parsed.get("message") or parsed.get("text") or parsed.get("body")
     await _store_and_match_incoming(phone=phone, message=message, parsed=parsed)
