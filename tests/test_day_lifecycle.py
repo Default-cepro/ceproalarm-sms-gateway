@@ -5,6 +5,7 @@ import pytest
 
 from src.services import day_lifecycle
 from src.services.day_lifecycle import DeviceAggregate
+from src.services.persistence import RunPersistence
 
 
 class _Logger:
@@ -225,6 +226,38 @@ async def test_execute_round_online_then_offline_keeps_online(tmp_path):
     assert state.aggregate[idx].status == "ONLINE"
     assert state.aggregate[idx].rounds_observed == 2
     assert state.aggregate[idx].error == ""
+
+
+async def test_resume_applies_round_result_for_first_index(tmp_path):
+    xlsx = tmp_path / "lote.xlsx"
+    _make_xlsx(
+        xlsx,
+        [
+            ["04141234567", "protrack vt08f", "ABC123", "", ""],
+            ["04149876543", "protrack vt08f", "XYZ789", "", ""],
+        ],
+    )
+    logger = _Logger()
+    persistence = RunPersistence(tmp_path / "run_state.json", logger)
+    persistence.ensure_day("2026-08-19", ["08:00:00"], [str(xlsx)])
+    # Simulate a mid-round kill: the first device (DataFrame index 0) was done.
+    persistence.record_round_result(0, str(xlsx), 0, "ONLINE", "")
+
+    states = day_lifecycle._prepare_daily_excel_states([str(xlsx)], logger, persistence=persistence)
+    state = states[0]
+    sms = StubSMSService(status="ONLINE", error_code="")
+    await day_lifecycle._execute_round_for_day(
+        day_states=states,
+        sms_service=sms,
+        round_number=1,
+        total_rounds=1,
+        logger=logger,
+        persistence=persistence,
+    )
+
+    assert len(sms.sent) == 1
+    assert state.aggregate[0].status == "ONLINE"
+    assert state.aggregate[1].status == "ONLINE"
 
 
 async def test_finalize_day_writes_status_and_notifies(tmp_path):
