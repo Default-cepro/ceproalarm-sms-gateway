@@ -219,3 +219,21 @@ def test_parse_body_empty():
 
 def test_parse_body_invalid_json():
     assert webhooks.parse_body_bytes(b"{bad", "application/json") == {}
+
+
+def test_success_payload_default():
+    assert webhooks.success_payload() == {"payload": {"success": True, "error": None}}
+
+
+def test_success_payload_with_payload_dict_preserves_success():
+    result = webhooks.success_payload({"payload": {"event": "sms:received"}})
+    assert result["payload"]["success"] is True
+    assert result["payload"]["error"] is None
+    assert result["payload"]["event"] == "sms:received"
+
+
+def test_success_payload_preserves_extra_top_level_keys():
+    result = webhooks.success_payload({"payload": {"duplicate": True}, "source": "x"})
+    assert result["payload"]["success"] is True
+    assert result["payload"]["duplicate"] is True
+    assert result["source"] == "x"

@@ -53,12 +53,13 @@ def parse_body_bytes(raw: bytes, content_type: str) -> Any:
 
 
 def success_payload(extra: Optional[dict] = None) -> dict:
-    base = {"payload": {"success": True, "error": None}}
-    if extra:
-        base.update(extra)
-        if isinstance(extra.get("payload"), dict):
-            base["payload"].update(extra["payload"])
-    return base
+    payload = {"success": True, "error": None}
+    if isinstance(extra, dict):
+        extra_payload = extra.get("payload")
+        if isinstance(extra_payload, dict):
+            payload.update(extra_payload)
+        return {"payload": payload, **{k: v for k, v in extra.items() if k != "payload"}}
+    return {"payload": payload}
 
 
 def _is_sms_gate_event(parsed: Any) -> bool:

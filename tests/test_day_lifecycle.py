@@ -8,6 +8,9 @@ from src.services.day_lifecycle import DeviceAggregate
 
 
 class _Logger:
+    def bind(self, **kwargs):
+        return self
+
     def info(self, *a, **k):
         pass
 
