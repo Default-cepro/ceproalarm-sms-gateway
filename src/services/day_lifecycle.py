@@ -162,7 +162,9 @@ async def _execute_round_for_day(
 
             if round_results:
                 for idx_key, payload in round_results.items():
-                    idx = valid_index_map.get(idx_key) or invalid_index_map.get(idx_key)
+                    idx = valid_index_map.get(idx_key)
+                    if idx is None:
+                        idx = invalid_index_map.get(idx_key)
                     if idx is None:
                         continue
                     status_value = str(payload.get("status") or "").strip().upper()
