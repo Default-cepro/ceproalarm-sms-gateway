@@ -1,6 +1,6 @@
 import asyncio
 from loguru import logger
-from ..api.server import normalize_phone
+from ..core.phones import normalize_phone
 
 
 async def Worker(
