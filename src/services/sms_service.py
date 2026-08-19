@@ -7,7 +7,7 @@ import httpx
 from loguru import logger
 
 from ..api import server as server_module
-from ..api.server import send_command_and_wait, send_command_via_local_api_and_wait
+from ..api.server import format_phone_for_local_api, send_command_and_wait, send_command_via_local_api_and_wait
 from ..core.parser import parse_response
 
 
@@ -89,10 +89,11 @@ class SMSService:
                 server_module.register_quiet_message_id(message_id)
             except Exception:
                 pass
+        api_phone = format_phone_for_local_api(phone)
         payload = {
             "id": message_id,
-            "to": phone,
-            "phoneNumbers": [phone],
+            "to": api_phone,
+            "phoneNumbers": [api_phone],
             "message": message,
             "meta": {"notification": True, "timestamp": int(time.time())},
         }

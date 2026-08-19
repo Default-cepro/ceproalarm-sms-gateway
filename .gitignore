@@ -3,6 +3,9 @@ tests/
 data/*
 !data/.gitkeep
 config/commands.json
+.ignore
+AGENTS.md
+PLAN.md
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
