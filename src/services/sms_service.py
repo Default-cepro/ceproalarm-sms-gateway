@@ -1,5 +1,4 @@
 import asyncio
-import os
 import time
 import uuid
 
@@ -8,6 +7,7 @@ from loguru import logger
 
 from ..api import server as server_module
 from ..api.server import format_phone_for_local_api, send_command_and_wait, send_command_via_local_api_and_wait
+from ..core.config import settings
 from ..core.parser import parse_response
 
 
@@ -17,11 +17,10 @@ class SMSService:
         self.retries = retries
         self.delay = delay
         self.timeout = timeout
-        self.local_api_base_url = os.getenv("SMS_GATE_LOCAL_API_BASE_URL", "http://127.0.0.1:18080").strip().rstrip("/")
-        self.local_api_username = os.getenv("SMS_GATE_LOCAL_API_USERNAME", "sms").strip()
-        self.local_api_password = os.getenv("SMS_GATE_LOCAL_API_PASSWORD", "")
-        raw = os.getenv("SMS_GATE_LOCAL_API_ENABLED", "0").strip().lower()
-        self.local_api_enabled = raw in {"1", "true", "yes", "on"}
+        self.local_api_base_url = settings.local_api_base_url
+        self.local_api_username = settings.local_api_username
+        self.local_api_password = settings.local_api_password
+        self.local_api_enabled = settings.local_api_enabled
         if self.local_api_enabled:
             logger.info("SMSService en modo local API directo (ADB/local server), sin polling cloud/private.")
 

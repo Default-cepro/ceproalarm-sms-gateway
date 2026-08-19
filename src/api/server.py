@@ -7,7 +7,6 @@ import logging
 import time
 import uuid
 import re
-import os
 import hmac
 import hashlib
 import httpx
@@ -16,22 +15,7 @@ from collections import deque
 from typing import Dict, Any, List, Optional, Callable, Set
 from datetime import datetime, timezone
 
-# Load .env if available so webhook settings work in local dev without shell exports.
-try:
-    from dotenv import load_dotenv as _dotenv_load  # type: ignore
-except Exception:
-    _dotenv_load = None
-
-
-def _reload_env():
-    if _dotenv_load:
-        try:
-            _dotenv_load(override=True)
-        except Exception:
-            pass
-
-
-_reload_env()
+from ..core.config import settings
 
 # evento para que main espere el primer request
 first_request_event: asyncio.Event = asyncio.Event()
@@ -55,41 +39,12 @@ quiet_outbound_message_ids_order: deque = deque()
 quiet_outbound_message_ids_set: Set[str] = set()
 
 
-def _env_bool(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name, "1" if default else "0")
-    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _env_int(name: str, default: int, min_value: int = 0) -> int:
-    raw = os.getenv(name, str(default)).strip()
-    try:
-        value = int(raw)
-    except Exception:
-        value = default
-    return max(min_value, value)
-
-
-SMS_GATE_SIGNING_KEY = os.getenv("SMS_GATE_WEBHOOK_SIGNING_KEY", "").strip()
-SMS_GATE_REQUIRE_SIGNATURE = _env_bool("SMS_GATE_REQUIRE_SIGNATURE", default=False)
-SMS_GATE_TIMESTAMP_TOLERANCE_SECONDS = _env_int("SMS_GATE_TIMESTAMP_TOLERANCE_SECONDS", 300, min_value=0)
-SMS_GATE_MAX_TRACKED_DELIVERIES = _env_int("SMS_GATE_MAX_TRACKED_DELIVERIES", 5000, min_value=100)
-SMS_GATE_LOCAL_API_ENABLED = _env_bool("SMS_GATE_LOCAL_API_ENABLED", default=False)
-SMS_GATE_LOCAL_API_BASE_URL = os.getenv("SMS_GATE_LOCAL_API_BASE_URL", "http://127.0.0.1:18080").strip().rstrip("/")
-SMS_GATE_LOCAL_API_USERNAME = os.getenv("SMS_GATE_LOCAL_API_USERNAME", "sms").strip()
-SMS_GATE_LOCAL_API_PASSWORD = os.getenv("SMS_GATE_LOCAL_API_PASSWORD", "")
-
-
 def _get_local_api_runtime_config() -> Dict[str, Any]:
-    _reload_env()
-    enabled = _env_bool("SMS_GATE_LOCAL_API_ENABLED", default=SMS_GATE_LOCAL_API_ENABLED)
-    base_url = os.getenv("SMS_GATE_LOCAL_API_BASE_URL", SMS_GATE_LOCAL_API_BASE_URL).strip().rstrip("/")
-    username = os.getenv("SMS_GATE_LOCAL_API_USERNAME", SMS_GATE_LOCAL_API_USERNAME).strip()
-    password = os.getenv("SMS_GATE_LOCAL_API_PASSWORD", SMS_GATE_LOCAL_API_PASSWORD)
     return {
-        "enabled": enabled,
-        "base_url": base_url,
-        "username": username,
-        "password": password,
+        "enabled": settings.local_api_enabled,
+        "base_url": settings.local_api_base_url,
+        "username": settings.local_api_username,
+        "password": settings.local_api_password,
     }
 
 # try to import dateutil parser for robust ISO parsing; fallback later
@@ -165,7 +120,7 @@ def format_phone_for_local_api(phone: Optional[str]) -> str:
     if raw.startswith("+"):
         return f"+{digits}"
 
-    country_code = os.getenv("SMS_GATE_LOCAL_API_COUNTRY_CODE", "58").strip()
+    country_code = settings.local_api_country_code
     country_code = "".join(ch for ch in country_code if ch.isdigit())
     if not country_code:
         return digits
@@ -286,15 +241,15 @@ def _verify_sms_gate_signature(raw_body: bytes, request: Request) -> Optional[st
     signature = (request.headers.get("x-signature") or "").strip()
     timestamp = (request.headers.get("x-timestamp") or "").strip()
 
-    if not SMS_GATE_SIGNING_KEY:
-        if SMS_GATE_REQUIRE_SIGNATURE:
+    if not settings.webhook_signing_key:
+        if settings.require_signature:
             return "SMS_GATE_WEBHOOK_SIGNING_KEY is not configured on server"
         return None
 
     # In local/ADB mode, incoming events can be unsigned. Only require headers
     # when signature enforcement is explicitly enabled.
     if not signature and not timestamp:
-        if SMS_GATE_REQUIRE_SIGNATURE:
+        if settings.require_signature:
             return "missing X-Signature or X-Timestamp header"
         return None
 
@@ -307,10 +262,10 @@ def _verify_sms_gate_signature(raw_body: bytes, request: Request) -> Optional[st
         return "invalid X-Timestamp header"
 
     now = int(time.time())
-    if abs(now - timestamp_int) > SMS_GATE_TIMESTAMP_TOLERANCE_SECONDS:
+    if abs(now - timestamp_int) > settings.timestamp_tolerance_seconds:
         return "timestamp out of accepted range"
 
-    mac = hmac.new(SMS_GATE_SIGNING_KEY.encode("utf-8"), digestmod=hashlib.sha256)
+    mac = hmac.new(settings.webhook_signing_key.encode("utf-8"), digestmod=hashlib.sha256)
     mac.update(raw_body)
     mac.update(timestamp.encode("utf-8"))
     expected_signature = mac.hexdigest()
@@ -328,7 +283,7 @@ def _remember_delivery(delivery_id: Optional[str]) -> bool:
     if delivery_id in recent_delivery_ids_set:
         return False
 
-    if len(recent_delivery_ids_order) >= SMS_GATE_MAX_TRACKED_DELIVERIES:
+    if len(recent_delivery_ids_order) >= settings.max_tracked_deliveries:
         oldest = recent_delivery_ids_order.popleft()
         recent_delivery_ids_set.discard(oldest)
 
@@ -344,7 +299,7 @@ def _remember_incoming_message(message_id: Optional[str]) -> bool:
     if message_id in recent_incoming_message_ids_set:
         return False
 
-    if len(recent_incoming_message_ids_order) >= SMS_GATE_MAX_TRACKED_DELIVERIES:
+    if len(recent_incoming_message_ids_order) >= settings.max_tracked_deliveries:
         oldest = recent_incoming_message_ids_order.popleft()
         recent_incoming_message_ids_set.discard(oldest)
 
@@ -365,7 +320,7 @@ def _remember_status_event(event_name: Optional[str], message_id: Optional[str],
     if key in recent_status_event_keys_set:
         return False
 
-    if len(recent_status_event_keys_order) >= SMS_GATE_MAX_TRACKED_DELIVERIES:
+    if len(recent_status_event_keys_order) >= settings.max_tracked_deliveries:
         oldest = recent_status_event_keys_order.popleft()
         recent_status_event_keys_set.discard(oldest)
 
@@ -379,7 +334,7 @@ def register_quiet_message_id(message_id: Optional[str]):
         return
     if message_id in quiet_outbound_message_ids_set:
         return
-    if len(quiet_outbound_message_ids_order) >= SMS_GATE_MAX_TRACKED_DELIVERIES:
+    if len(quiet_outbound_message_ids_order) >= settings.max_tracked_deliveries:
         oldest = quiet_outbound_message_ids_order.popleft()
         quiet_outbound_message_ids_set.discard(oldest)
     quiet_outbound_message_ids_order.append(message_id)
